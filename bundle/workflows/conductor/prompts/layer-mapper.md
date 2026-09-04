@@ -42,6 +42,23 @@ The layer map must include:
 - skeleton todo filename for each layer
 - open risks
 
+Classify every layer with exactly one routing value:
+
+- `work_kind: behavior` (default): adds or changes observable behavior and uses
+  the normal Gherkin, test-author, red-test, implementation, and review path.
+- `work_kind: cleanup`: removes one private superseded implementation only after
+  its replacement is active, consumers are migrated, and existing behavior
+  tests preserve the contract. Cleanup may appear at any dependency-valid point
+  and may use any layer id; it is not tied to a final layer or naming pattern.
+
+Do not combine behavior and cleanup in one layer. Missing or ambiguous
+classification must be `behavior`. Public API, persisted data/schema, external
+event contracts, and cross-release retirement are behavior/migration work, not
+ordinary cleanup. Never propose a permanent test whose purpose is to prove that
+an old private implementation is not called; cleanup safety comes from existing
+behavior tests, green-before/green-after verification, exact removal and
+reference checks, boundaries, and human review.
+
 Artifact style:
 
 - Use visual-first structure. Prefer Mermaid maps and tables over prose.
@@ -49,13 +66,17 @@ Artifact style:
 - `01-layer-map.md` must include:
   - frontmatter first, including an empty or current `selected_layer` field when useful
   - `## Layer Flow` Mermaid flowchart showing recommended order and major dependencies
-  - `## Layer Matrix` table with order, layer id, todo file, responsibility, implementation boundary, top-level behavior touched, dependencies, and risk
+  - `## Layer Matrix` table with order, layer id, work kind, todo file, responsibility, implementation boundary, top-level behavior touched, dependencies, and risk
   - `## Selection Board` table optimized for the human to choose the next layer, with layer id, why this layer now, readiness, and blocking notes
   - `## Open Risks` table with risk, affected layer, impact, and mitigation
   - `## Decision Log` table with decision, human comment, and timestamp
 - Skeleton todo files should also be visual-first:
-  - frontmatter first with `status: skeleton`, `owner: human`, `workflow: layered-tdd`, and `selected_layer` set to that layer id when known
+  - frontmatter first with `status: skeleton`, `owner: human`, `workflow: layered-tdd`, `work_kind: behavior` or `work_kind: cleanup`, and `selected_layer` set to that layer id when known
   - `## Boundary` table with allowed files/areas, forbidden files/areas, and behavior constraints
+
+Cleanup skeletons must also name the proposed replacement, migration
+dependencies, preliminary repository-relative removal targets, existing
+preservation tests/evidence, and bounded remaining-reference patterns/roots.
 
 After revision, the active todo filenames in the layer map and the non-superseded files in `layers/` must match exactly. Do not leave stale draft todos for layers that were removed by human feedback.
 

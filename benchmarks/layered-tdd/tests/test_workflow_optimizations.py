@@ -18,6 +18,9 @@ REVIEWER = WORKFLOW_ROOT / "prompts" / "layer-reviewer.md"
 TODO_GENERATOR = WORKFLOW_ROOT / "prompts" / "layer-todo-generator.md"
 TEST_AUTHOR = WORKFLOW_ROOT / "prompts" / "agent-test-author.md"
 IMPLEMENTOR = WORKFLOW_ROOT / "prompts" / "implementor.md"
+CLEANUP_PLANNER = WORKFLOW_ROOT / "prompts" / "cleanup-planner.md"
+CLEANUP_IMPLEMENTOR = WORKFLOW_ROOT / "prompts" / "cleanup-implementor.md"
+CLEANUP_REVIEWER = WORKFLOW_ROOT / "prompts" / "cleanup-reviewer.md"
 
 
 def load_module(name: str, path: Path):
@@ -34,6 +37,8 @@ red_gate = load_module("record_red_gate", SCRIPTS / "record-red-gate.py")
 snapshot = load_module("capture_layer_snapshot", SCRIPTS / "capture-layer-snapshot.py")
 layer_diff = load_module("create_layer_diff", SCRIPTS / "create-layer-diff.py")
 layer_context = load_module("build_layer_context", SCRIPTS / "build-layer-context.py")
+layer_router = load_module("route_selected_layer", SCRIPTS / "route-selected-layer.py")
+cleanup_check = load_module("check_cleanup_result", SCRIPTS / "check-cleanup-result.py")
 
 
 @contextmanager
@@ -375,6 +380,127 @@ Given a pending order, when it is cancelled, then its state is cancelled.
         self.assertNotEqual(first_hash, second_hash)
 
 
+class LayerWorkKindRoutingTests(unittest.TestCase):
+    def create_layer(self, root: Path, work_kind: str | None) -> Path:
+        plan = root / ".github" / "plans" / "slice"
+        layers = plan / "layers"
+        layers.mkdir(parents=True)
+        layer_map = plan / "01-layer-map.md"
+        layer_map.write_text("---\nselected_layer: arbitrary-id\n---\n", encoding="utf-8")
+        declaration = f"work_kind: {work_kind}\n" if work_kind is not None else ""
+        (layers / "arbitrary-id.todo.md").write_text(
+            f"---\nselected_layer: arbitrary-id\n{declaration}---\n",
+            encoding="utf-8",
+        )
+        return layer_map
+
+    def test_missing_work_kind_preserves_behavior_route(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = layer_router.classify(self.create_layer(Path(directory), None))
+        self.assertEqual(result["work_kind"], "behavior")
+
+    def test_cleanup_is_explicit_and_independent_of_layer_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = layer_router.classify(self.create_layer(Path(directory), "cleanup"))
+        self.assertEqual(result["work_kind"], "cleanup")
+        self.assertEqual(result["selected_layer"], "arbitrary-id")
+
+    def test_unknown_work_kind_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layer_map = self.create_layer(Path(directory), "migration")
+            with self.assertRaises(SystemExit):
+                layer_router.classify(layer_map)
+
+
+class CleanupResultTests(unittest.TestCase):
+    def cleanup_todo(self, root: Path) -> Path:
+        todo = root / ".github" / "plans" / "slice" / "layers" / "remove-old.todo.md"
+        todo.parent.mkdir(parents=True)
+        todo.write_text(
+            """---
+work_kind: cleanup
+selected_layer: remove-old
+---
+
+## Removal Inventory
+
+| Target | Kind | Replacement | Expected state |
+| --- | --- | --- | --- |
+| `legacy/old.go` | file | `src/new.go` | removed |
+
+## Cleanup Contract
+
+Remove one superseded private adapter without changing behavior.
+
+## Supersession Chain
+
+`src/new.go` replaced `legacy/old.go` and all consumers have migrated.
+
+## Preservation Contract
+
+Existing behavior tests remain unchanged.
+
+## Remaining Reference Checks
+
+| Pattern | Root | Reason |
+| --- | --- | --- |
+| `OldAdapter` | `src/` | stale registration |
+
+## Implementation Boundary
+
+Only `legacy/old.go` may be removed.
+
+## Task Board
+
+Remove the declared target.
+
+## Risk Board
+
+Dynamic references are checked by the bounded reference scan.
+
+## Decision Log
+
+Human approval pending.
+""",
+            encoding="utf-8",
+        )
+        return todo
+
+    def test_passes_when_targets_and_references_are_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "src" / "new.go").write_text("package src\n", encoding="utf-8")
+            result = cleanup_check.check(self.cleanup_todo(root), root)
+        self.assertTrue(result["passed"])
+
+    def test_fails_when_declared_target_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "legacy").mkdir()
+            (root / "legacy" / "old.go").write_text("package legacy\n", encoding="utf-8")
+            (root / "src").mkdir()
+            result = cleanup_check.check(self.cleanup_todo(root), root)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["remaining_targets"], ["legacy/old.go"])
+
+    def test_fails_when_bounded_reference_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "src" / "registry.go").write_text("var x = OldAdapter{}\n", encoding="utf-8")
+            result = cleanup_check.check(self.cleanup_todo(root), root)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["remaining_references"], ["src/registry.go:1:OldAdapter"])
+
+    def test_plan_validation_accepts_bounded_repository_relative_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            result = cleanup_check.validate_plan(self.cleanup_todo(root), root)
+        self.assertTrue(result["passed"])
+
+
 class WorkflowWiringTests(unittest.TestCase):
     def test_reviewer_has_no_raw_verification_stream_references(self) -> None:
         prompt = REVIEWER.read_text(encoding="utf-8")
@@ -430,6 +556,37 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("Do not run tests, lint, or security commands", todo_prompt)
         self.assertIn("Do not run a targeted test command", test_prompt)
         self.assertIn("Do not rerun the full suite", implementor_prompt)
+
+    def test_cleanup_route_skips_behavior_test_author_and_red_gate(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        router = workflow.split("  - name: selected_layer_router\n", 1)[1].split("\n  - name:", 1)[0]
+        self.assertIn("output.work_kind == 'cleanup'", router)
+        self.assertIn("to: cleanup_plan_context", router)
+        cleanup_section = workflow.split("  - name: cleanup_plan_context\n", 1)[1].split(
+            "\n  - name: selected_layer_context", 1
+        )[0]
+        self.assertNotIn("to: agent_test_author", cleanup_section)
+        self.assertNotIn("to: red_suite_verifier", cleanup_section)
+        self.assertNotIn("to: implementor\n", cleanup_section)
+        self.assertIn("to: cleanup_implementor", cleanup_section)
+
+    def test_cleanup_prompts_reject_implementation_coupled_absence_tests(self) -> None:
+        for prompt_path in (CLEANUP_PLANNER, CLEANUP_IMPLEMENTOR, CLEANUP_REVIEWER):
+            prompt = prompt_path.read_text(encoding="utf-8")
+            self.assertIn("not called", prompt)
+        planner = CLEANUP_PLANNER.read_text(encoding="utf-8")
+        self.assertIn("behavior/test-hardening", planner)
+        self.assertIn("public API", planner)
+
+    def test_cleanup_agents_receive_bounded_context(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        for name, consumer in {
+            "cleanup_plan_context": "cleanup-planner",
+            "cleanup_implementation_context": "cleanup-implementor",
+        }.items():
+            block = workflow.split(f"  - name: {name}\n", 1)[1].split("\n  - name:", 1)[0]
+            self.assertIn("build-layer-context.py", block)
+            self.assertIn(f"- {consumer}", block)
 
 
 if __name__ == "__main__":

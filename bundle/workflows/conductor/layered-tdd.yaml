@@ -27,7 +27,7 @@ workflow:
     - "If the Copilot CLI caveman skill is available, use caveman for planning notes, checkpoints, summaries, and human gate text. Keep artifact schemas, commands, paths, errors, and verification results exact and readable."
     - "When graphify-out/graph.json exists, use Graphify only for bounded repository-navigation questions before opening returned source locations. Do not rebuild or update the graph from an agent prompt."
   limits:
-    max_iterations: 80
+    max_iterations: 120
   input:
     request:
       type: string
@@ -564,7 +564,9 @@ agents:
 
       Layer map artifact: `{{ layer_mapper.output.artifact_path }}`
       Layer count: {{ layer_mapper.output.layer_count }}
-      {% if layer_reviewer is defined and layer_reviewer.output is defined and layer_reviewer.output.more_layers_remaining is defined and layer_reviewer.output.more_layers_remaining and layer_reviewer.output.recommended_next_layer is defined and layer_reviewer.output.recommended_next_layer %}
+      {% if cleanup_reviewer is defined and cleanup_reviewer.output is defined and cleanup_reviewer.output.more_layers_remaining is defined and cleanup_reviewer.output.more_layers_remaining and cleanup_reviewer.output.recommended_next_layer is defined and cleanup_reviewer.output.recommended_next_layer %}
+      Recommended next layer: `{{ cleanup_reviewer.output.recommended_next_layer }}`
+      {% elif layer_reviewer is defined and layer_reviewer.output is defined and layer_reviewer.output.more_layers_remaining is defined and layer_reviewer.output.more_layers_remaining and layer_reviewer.output.recommended_next_layer is defined and layer_reviewer.output.recommended_next_layer %}
       Recommended next layer: `{{ layer_reviewer.output.recommended_next_layer }}`
       {% else %}
       Recommended next layer: `{{ layer_mapper.output.recommended_next_layer }}`
@@ -618,7 +620,7 @@ agents:
       - "{{ layer_mapper.output.artifact_path }}"
       - "{{ layer_selection_gate.output.additional_input.selected_layer }}"
     routes:
-      - to: selected_layer_context
+      - to: selected_layer_router
 
   - name: layer_map_revision_selection_recorder
     type: script
@@ -632,7 +634,542 @@ agents:
       - "{{ layer_map_reviser.output.artifact_path }}"
       - "{{ layer_map_revision_gate.output.additional_input.selected_layer }}"
     routes:
+      - to: revised_layer_router
+
+  - name: selected_layer_router
+    type: script
+    description: Route the selected layer by its explicit work kind.
+    input:
+      - layer_mapper.output.artifact_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/route-selected-layer.py
+      - "{{ layer_mapper.output.artifact_path }}"
+    routes:
+      - to: cleanup_plan_context
+        when: "{{ output.work_kind == 'cleanup' }}"
       - to: selected_layer_context
+
+  - name: revised_layer_router
+    type: script
+    description: Route a selected layer from the revised map by its explicit work kind.
+    input:
+      - layer_map_reviser.output.artifact_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/route-selected-layer.py
+      - "{{ layer_map_reviser.output.artifact_path }}"
+    routes:
+      - to: cleanup_plan_context
+        when: "{{ output.work_kind == 'cleanup' }}"
+      - to: selected_layer_context
+
+  - name: cleanup_plan_context
+    type: script
+    description: Build a bounded context projection for the selected cleanup planner.
+    input:
+      - layer_mapper.output.artifact_path
+      - workflow.input.request
+    command: python3
+    args:
+      - workflows/conductor/scripts/build-layer-context.py
+      - --consumer
+      - cleanup-planner
+      - --map
+      - "{{ layer_mapper.output.artifact_path }}"
+      - --request
+      - "{{ workflow.input.request }}"
+    routes:
+      - to: cleanup_planner
+
+  - name: cleanup_planner
+    description: Detail one removal-only supersession chain without creating a red-test contract.
+    model: gpt-5.4
+    reasoning:
+      effort: high
+    input:
+      - cleanup_plan_context.output.manifest_path
+      - cleanup_plan_context.output.selected_layer
+      - cleanup_plan_context.output.todo_path
+      - cleanup_plan_context.output.allowed_paths
+      - cleanup_plan_context.output.forbidden_paths
+      - cleanup_plan_context.output.read_only_paths
+      - cleanup_plan_context.output.source_context
+      - cleanup_plan_context.output.layer_contract
+      - cleanup_plan_context.output.request_contract
+      - cleanup_plan_context.output.source_fingerprint
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+    prompt: !file prompts/cleanup-planner.md
+    output:
+      artifact_path:
+        type: string
+      selected_layer:
+        type: string
+      ready_for_cleanup:
+        type: boolean
+      blockers:
+        type: array
+      removal_targets:
+        type: array
+      summary:
+        type: string
+    routes:
+      - to: cleanup_plan_gate
+        when: "{{ output.ready_for_cleanup }}"
+      - to: cleanup_plan_blocked_gate
+
+  - name: cleanup_plan_reviser
+    description: Reconcile human feedback into the same cleanup plan.
+    model: gpt-5.4
+    reasoning:
+      effort: high
+    input:
+      - cleanup_planner.output.artifact_path
+      - cleanup_plan_gate.output.additional_input.feedback?
+      - cleanup_plan_revision_gate.output.additional_input.feedback?
+      - cleanup_plan_blocked_gate.output.additional_input.feedback?
+      - cleanup_baseline_failure_gate.output.additional_input.feedback?
+      - cleanup_checkpoint_gate.output.additional_input.feedback?
+      - cleanup_approval_gate.output.additional_input.feedback?
+    prompt: !file prompts/cleanup-plan-reviser.md
+    output:
+      artifact_path:
+        type: string
+      selected_layer:
+        type: string
+      ready_for_cleanup:
+        type: boolean
+      blockers:
+        type: array
+      removal_targets:
+        type: array
+      summary:
+        type: string
+    routes:
+      - to: cleanup_plan_revision_gate
+        when: "{{ output.ready_for_cleanup }}"
+      - to: cleanup_plan_blocked_gate
+
+  - name: cleanup_plan_blocked_gate
+    type: human_gate
+    input:
+      - cleanup_planner.output.artifact_path?
+      - cleanup_planner.output.blockers?
+      - cleanup_plan_reviser.output.artifact_path?
+      - cleanup_plan_reviser.output.blockers?
+      - cleanup_plan_validator.output.errors?
+    prompt: |
+      This cleanup plan is not safe to implement. Review its blockers and either
+      revise the same plan, return to layer selection to add behavior/test
+      hardening, or stop.
+
+      {% if cleanup_plan_reviser is defined and cleanup_plan_reviser.output is defined %}
+      Cleanup todo: `{{ cleanup_plan_reviser.output.artifact_path }}`
+      Blockers: {{ cleanup_plan_reviser.output.blockers }}
+      {% else %}
+      Cleanup todo: `{{ cleanup_planner.output.artifact_path }}`
+      Blockers: {{ cleanup_planner.output.blockers }}
+      {% endif %}
+      {% if cleanup_plan_validator is defined and cleanup_plan_validator.output is defined %}
+      Structural validation errors: {{ cleanup_plan_validator.output.errors }}
+      {% endif %}
+    options:
+      - label: Revise this same cleanup plan.
+        value: revise
+        prompt_for: feedback
+        route: cleanup_plan_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: cleanup_plan_gate
+    type: human_gate
+    prompt: |
+      Review the cleanup plan. Cleanup skips test authoring and the expected-red
+      gate; safety comes from existing behavior tests, a green baseline, exact
+      removal/reference checks, bounded changes, post-cleanup verification, and review.
+
+      Selected layer: `{{ cleanup_planner.output.selected_layer }}`
+      Cleanup todo: `{{ cleanup_planner.output.artifact_path }}`
+      Ready for cleanup: {{ cleanup_planner.output.ready_for_cleanup }}
+      Blockers: {{ cleanup_planner.output.blockers }}
+      Removal targets: {{ cleanup_planner.output.removal_targets }}
+      Summary: {{ cleanup_planner.output.summary }}
+    options:
+      - label: Approve this cleanup plan and run the green baseline.
+        value: approve_cleanup
+        prompt_for: feedback
+        route: cleanup_plan_validator
+      - label: Revise this same cleanup plan.
+        value: revise
+        prompt_for: feedback
+        route: cleanup_plan_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: cleanup_plan_revision_gate
+    type: human_gate
+    prompt: |
+      Review the revised cleanup plan. It remains the same selected cleanup
+      layer and must not contain observable behavior changes.
+
+      Selected layer: `{{ cleanup_plan_reviser.output.selected_layer }}`
+      Cleanup todo: `{{ cleanup_plan_reviser.output.artifact_path }}`
+      Ready for cleanup: {{ cleanup_plan_reviser.output.ready_for_cleanup }}
+      Blockers: {{ cleanup_plan_reviser.output.blockers }}
+      Removal targets: {{ cleanup_plan_reviser.output.removal_targets }}
+      Summary: {{ cleanup_plan_reviser.output.summary }}
+    options:
+      - label: Approve this cleanup plan and run the green baseline.
+        value: approve_cleanup
+        prompt_for: feedback
+        route: cleanup_plan_validator
+      - label: Revise this same cleanup plan again.
+        value: revise
+        prompt_for: feedback
+        route: cleanup_plan_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: cleanup_plan_validator
+    type: script
+    description: Fail closed when the approved cleanup artifact lacks its required bounded contract.
+    input:
+      - cleanup_plan_context.output.todo_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/check-cleanup-result.py
+      - --todo
+      - "{{ cleanup_plan_context.output.todo_path }}"
+      - --plan-only
+    routes:
+      - to: cleanup_baseline_tests
+        when: "{{ output.passed }}"
+      - to: cleanup_plan_blocked_gate
+
+  - name: cleanup_baseline_tests
+    type: script
+    description: Confirm the behavior suite is green immediately before cleanup.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - cleanup-baseline-tests
+      - --command
+      - "{{ workflow.input.test_command }}"
+    timeout: 600
+    routes:
+      - to: cleanup_baseline_lint
+
+  - name: cleanup_baseline_lint
+    type: script
+    description: Confirm lint/static checks are green immediately before cleanup.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - cleanup-baseline-lint
+      - --command
+      - "{{ workflow.input.lint_command }}"
+    timeout: 600
+    routes:
+      - to: cleanup_baseline_security
+
+  - name: cleanup_baseline_security
+    type: script
+    description: Confirm dependency/security checks are green immediately before cleanup.
+    input:
+      - cleanup_baseline_tests.output.exit_code
+      - cleanup_baseline_lint.output.exit_code
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - cleanup-baseline-security
+      - --command
+      - "{{ workflow.input.security_command }}"
+    timeout: 600
+    routes:
+      - to: cleanup_implementation_context
+        when: "{{ cleanup_baseline_tests.output.exit_code == 0 and cleanup_baseline_lint.output.exit_code == 0 and output.exit_code == 0 }}"
+      - to: cleanup_baseline_failure_gate
+
+  - name: cleanup_baseline_failure_gate
+    type: human_gate
+    prompt: |
+      Cleanup cannot begin because its immediate green baseline failed.
+      Tests: {{ cleanup_baseline_tests.output.exit_code }}
+      Lint: {{ cleanup_baseline_lint.output.exit_code }}
+      Security: {{ cleanup_baseline_security.output.exit_code }}
+      Full evidence remains at the paths returned by those checks.
+    options:
+      - label: Retry the cleanup baseline after fixing the repository.
+        value: retry
+        route: cleanup_baseline_tests
+      - label: Revise the cleanup plan.
+        value: revise
+        prompt_for: feedback
+        route: cleanup_plan_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: cleanup_implementation_context
+    type: script
+    description: Refresh the bounded cleanup projection immediately before removal.
+    input:
+      - layer_mapper.output.artifact_path
+      - workflow.input.request
+    command: python3
+    args:
+      - workflows/conductor/scripts/build-layer-context.py
+      - --consumer
+      - cleanup-implementor
+      - --map
+      - "{{ layer_mapper.output.artifact_path }}"
+      - --request
+      - "{{ workflow.input.request }}"
+    routes:
+      - to: cleanup_layer_snapshot
+
+  - name: cleanup_layer_snapshot
+    type: script
+    description: Capture the exact working tree immediately before cleanup.
+    command: python3
+    args:
+      - workflows/conductor/scripts/capture-layer-snapshot.py
+    routes:
+      - to: cleanup_implementor
+
+  - name: cleanup_implementor
+    description: Remove only the approved private supersession chain.
+    model: gpt-5.4
+    input:
+      - cleanup_implementation_context.output.manifest_path
+      - cleanup_implementation_context.output.selected_layer
+      - cleanup_implementation_context.output.todo_path
+      - cleanup_implementation_context.output.allowed_paths
+      - cleanup_implementation_context.output.forbidden_paths
+      - cleanup_implementation_context.output.read_only_paths
+      - cleanup_implementation_context.output.source_context
+      - cleanup_implementation_context.output.layer_contract
+      - cleanup_implementation_context.output.request_contract
+      - cleanup_implementation_context.output.source_fingerprint
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+    prompt: !file prompts/cleanup-implementor.md
+    output:
+      selected_layer:
+        type: string
+      files_removed:
+        type: array
+      tests_removed:
+        type: array
+      files_modified:
+        type: array
+      checkpoint_required:
+        type: boolean
+      checkpoint_summary:
+        type: string
+      summary:
+        type: string
+    routes:
+      - to: cleanup_checkpoint_gate
+        when: "{{ output.checkpoint_required }}"
+      - to: cleanup_verification_tests
+
+  - name: cleanup_checkpoint_gate
+    type: human_gate
+    prompt: |
+      Cleanup exposed a hidden consumer, contract change, or missing safety
+      evidence. No broader removal is authorized.
+
+      Selected layer: `{{ cleanup_implementor.output.selected_layer }}`
+      Cleanup todo: `{{ cleanup_implementation_context.output.todo_path }}`
+      Checkpoint: {{ cleanup_implementor.output.checkpoint_summary }}
+    options:
+      - label: Revise the cleanup plan.
+        value: revise
+        prompt_for: feedback
+        route: cleanup_plan_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: cleanup_verification_tests
+    type: script
+    description: Run behavior tests after cleanup and retain complete evidence by path.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - cleanup-verification-tests
+      - --command
+      - "{{ workflow.input.test_command }}"
+    timeout: 600
+    routes:
+      - to: cleanup_verification_lint
+
+  - name: cleanup_verification_lint
+    type: script
+    description: Run lint/static checks after cleanup and retain complete evidence by path.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - cleanup-verification-lint
+      - --command
+      - "{{ workflow.input.lint_command }}"
+    timeout: 600
+    routes:
+      - to: cleanup_verification_security
+
+  - name: cleanup_verification_security
+    type: script
+    description: Run dependency/security checks after cleanup and retain complete evidence by path.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - cleanup-verification-security
+      - --command
+      - "{{ workflow.input.security_command }}"
+    timeout: 600
+    routes:
+      - to: cleanup_result_check
+
+  - name: cleanup_result_check
+    type: script
+    description: Verify declared removal targets and bounded fixed-string references are absent.
+    input:
+      - cleanup_implementation_context.output.todo_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/check-cleanup-result.py
+      - --todo
+      - "{{ cleanup_implementation_context.output.todo_path }}"
+    routes:
+      - to: cleanup_layer_diff
+
+  - name: cleanup_layer_diff
+    type: script
+    description: Build a bounded cleanup-only patch and classify its boundary.
+    input:
+      - cleanup_layer_snapshot.output.snapshot_tree
+      - cleanup_implementation_context.output.todo_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/create-layer-diff.py
+      - --snapshot-tree
+      - "{{ cleanup_layer_snapshot.output.snapshot_tree }}"
+      - --todo
+      - "{{ cleanup_implementation_context.output.todo_path }}"
+    routes:
+      - to: cleanup_reviewer
+
+  - name: cleanup_reviewer
+    description: Review one completed cleanup layer without inventing absence tests.
+    model: gpt-5.4
+    reasoning:
+      effort: high
+    input:
+      - layer_mapper.output.artifact_path
+      - cleanup_implementation_context.output.todo_path
+      - cleanup_implementation_context.output.request_contract
+      - cleanup_baseline_tests.output.exit_code
+      - cleanup_baseline_lint.output.exit_code
+      - cleanup_baseline_security.output.exit_code
+      - cleanup_verification_tests.output.exit_code
+      - cleanup_verification_tests.output.duration_ms
+      - cleanup_verification_tests.output.passed_count
+      - cleanup_verification_tests.output.failed_count
+      - cleanup_verification_tests.output.failed_test_names
+      - cleanup_verification_tests.output.bounded_excerpt
+      - cleanup_verification_tests.output.evidence_path
+      - cleanup_verification_lint.output.exit_code
+      - cleanup_verification_lint.output.bounded_excerpt
+      - cleanup_verification_lint.output.evidence_path
+      - cleanup_verification_security.output.exit_code
+      - cleanup_verification_security.output.bounded_excerpt
+      - cleanup_verification_security.output.evidence_path
+      - cleanup_result_check.output.passed
+      - cleanup_result_check.output.remaining_targets
+      - cleanup_result_check.output.remaining_references
+      - cleanup_result_check.output.errors
+      - cleanup_layer_diff.output.changed_files
+      - cleanup_layer_diff.output.bounded_patch
+      - cleanup_layer_diff.output.patch_path
+      - cleanup_layer_diff.output.patch_truncated
+      - cleanup_layer_diff.output.boundary_status
+      - cleanup_layer_diff.output.boundary_violations
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+    prompt: !file prompts/cleanup-reviewer.md
+    output:
+      artifact_path:
+        type: string
+      approved_recommendation:
+        type: boolean
+      more_layers_remaining:
+        type: boolean
+      recommended_next_layer:
+        type: string
+      issues:
+        type: array
+      summary:
+        type: string
+    routes:
+      - to: cleanup_approval_gate
+
+  - name: cleanup_approval_gate
+    type: human_gate
+    prompt: |
+      Review the cleanup result and reviewer notes.
+
+      Cleaned layer: `{{ cleanup_implementor.output.selected_layer }}`
+      Reviewed artifact: `{{ cleanup_reviewer.output.artifact_path }}`
+      Approval recommended: {{ cleanup_reviewer.output.approved_recommendation }}
+      More layers remaining: {{ cleanup_reviewer.output.more_layers_remaining }}
+      Review issues: {{ cleanup_reviewer.output.issues }}
+      Summary: {{ cleanup_reviewer.output.summary }}
+    options:
+      - label: Approve this cleanup and choose another layer.
+        value: approve_more_layers
+        prompt_for: feedback
+        route: layer_selection_gate
+      - label: Approve this cleanup and run final slice review.
+        value: approve_final_review
+        prompt_for: feedback
+        route: final_reviewer
+      - label: Send this cleanup back for focused removal fixes.
+        value: request_fixes
+        prompt_for: feedback
+        route: cleanup_implementation_context
+      - label: Revise the cleanup plan because its contract changed.
+        value: revise_plan
+        prompt_for: feedback
+        route: cleanup_plan_reviser
+      - label: Stop this slice.
+        value: stop
+        route: stopped
 
   - name: selected_layer_context
     type: script
@@ -1344,11 +1881,13 @@ agents:
       - requirements_griller.output.artifact_path?
       - layer_mapper.output.artifact_path?
       - layer_todo_generator.output.artifact_path?
+      - cleanup_implementation_context.output?
       - final_reviewer.output.artifact_path?
     reason: Layered TDD slice complete.
     output_template:
       status: complete
       requirements_artifact: "{{ requirements_griller.output.artifact_path }}"
       layer_map: "{{ layer_mapper.output.artifact_path }}"
-      last_layer_todo: "{{ layer_todo_generator.output.artifact_path }}"
+      last_layer_todo: >-
+        {% if cleanup_implementation_context is defined and cleanup_implementation_context.output is defined %}{{ cleanup_implementation_context.output.todo_path }}{% else %}{{ layer_todo_generator.output.artifact_path }}{% endif %}
       final_review: "{{ final_reviewer.output.artifact_path }}"

@@ -19,6 +19,8 @@ Hard rules:
   `01-layer-map.md`.
 - Reconcile skeleton todos only in that active folder, following the contract
   in `workflows/conductor/prompts/layer-mapper.md`.
+- Preserve or deliberately revise each layer's `work_kind`. Default ambiguous or
+  mixed work to `behavior`; never infer cleanup from a layer id or its position.
 
 Return structured output:
 

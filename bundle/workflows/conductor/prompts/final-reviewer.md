@@ -23,6 +23,7 @@ Tasks:
    - waived red-test gates
    - residual risks
    - memory candidates
+   - each layer's `work_kind`, including cleanup removal/reference evidence
 4. Do not capture memory yourself. Only propose candidates for human approval.
 
 Use frontmatter:
@@ -39,12 +40,17 @@ Artifact style:
   - frontmatter first, including `memory_decision` when useful
   - `## Completion Dashboard` table with slice goal, status, owner, layers completed, verification result, residual risk count, memory candidate count, and next human decision
   - `## Slice Flow` Mermaid flowchart showing requirements to layers to final review
-  - `## Layer Completion Matrix` table with layer, todo file, status, red-test state, verification summary, and approval notes
+  - `## Layer Completion Matrix` table with layer, work kind, todo file, status, applicable gate state, verification summary, and approval notes
   - `## Verification Matrix` table with command, latest exit code/result, and evidence
   - `## Waived Gates` table with layer, gate, reason, and risk
   - `## Residual Risks` table with risk, impact, mitigation, and owner
   - `## Memory Candidates` table with candidate id, observation, durability, destination suggestion, and approval checkbox
   - `## Human Memory Decision` section that makes capture/skip/revise choices obvious
+
+For cleanup layers, a red-test gate is not applicable, not waived. Confirm that
+their green baseline, post-cleanup verification, declared removals, and bounded
+remaining-reference checks passed. Do not request tests coupled to the deleted
+private implementation.
 
 Return structured output:
 

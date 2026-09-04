@@ -22,6 +22,42 @@ boundary, or human-approval guarantees.
 The highest-value direction is to optimize the deterministic happy path before
 optimizing exceptional revision paths.
 
+## Cleanup-Specific Route
+
+Status: implemented and locally validated 2026-09-04. The Go suite, 39 Python
+structural/unit tests, temporary installation parity, Conductor validation, and
+`git diff --check` passed. No token-savings claim is made until a requested,
+comparable benchmark is run.
+
+The workflow now distinguishes `work_kind: behavior|cleanup` per layer. Missing
+classification remains `behavior`, so existing maps keep the current path.
+Cleanup can use any layer id and appear wherever its dependencies permit.
+
+```mermaid
+flowchart LR
+    Select["selected layer"] --> Kind{"work_kind"}
+    Kind -- "behavior/default" --> Existing["existing TDD path unchanged"]
+    Kind -- "cleanup" --> Plan["cleanup planner"]
+    Plan --> Base["green baseline"]
+    Base --> Remove["cleanup implementor"]
+    Remove --> Checks["declared removals + bounded references + verification"]
+    Checks --> Review["cleanup reviewer"]
+```
+
+| Cleanup invariant | Enforcement |
+| --- | --- |
+| Replacement is active and consumers migrated. | Cleanup-plan contract plus human approval; incomplete plans cannot reach implementation. |
+| Observable behavior is already protected. | Existing behavior tests are the preservation contract; baseline and post-cleanup suites must be green. |
+| No egg-and-chicken absence tests. | Cleanup prompts prohibit permanent tests asserting an old private implementation is unused or absent. |
+| Obsolete implementation-coupled tests may leave with obsolete code. | They must be named removal targets; behavior-oriented tests remain. |
+| Deletion is exact and bounded. | Repository-relative removal inventory, fixed-string reference patterns/roots, layer snapshot/diff, and boundary checks. |
+| Ambiguous or mixed work is not cleanup. | Mapper defaults it to behavior or splits a prerequisite behavior/test-hardening layer. |
+| Public/data/event/cross-release retirement is excluded. | Route it as behavior/migration work with its own contract. |
+
+Expected happy-path model calls for a cleanup layer are three: cleanup planner,
+cleanup implementor, and cleanup reviewer. Baseline, verification, routing,
+snapshot/diff, and exact removal/reference checks are deterministic steps.
+
 ```mermaid
 flowchart TD
     Telemetry["Extend per-invocation telemetry"] --> Evidence["Bound verification evidence"]

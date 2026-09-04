@@ -15,7 +15,13 @@ flowchart LR
     Slice -- "no" --> LayerMap["01-layer-map.md"]
     SliceRun --> LayerMap
     LayerMap --> LayerTodo["layers/<nn>-<layer>.todo.md"]
-    LayerTodo --> Context["bounded context projection"]
+    LayerTodo --> Kind{"work_kind"}
+    Kind -- "behavior or missing" --> Context["bounded behavior context"]
+    Kind -- "cleanup" --> CleanupPlan["cleanup plan approval"]
+    CleanupPlan --> CleanupBase["green baseline"]
+    CleanupBase --> Cleanup["remove superseded implementation"]
+    Cleanup --> CleanupCheck["removal + reference + green checks"]
+    CleanupCheck --> Review
     Context --> RedGate["Run full test suite"]
     RedGate --> RedDecision{"Review red/green evidence"}
     RedDecision -- "revise" --> LayerTodo
@@ -36,6 +42,7 @@ flowchart LR
 | One run should finish one selected slice. | If the request is large, split it first, then run one slice. |
 | Humans own top-level behavior. | You approve requirements, layer choice, Gherkin, red-test state, checkpoints, and final memory. |
 | Agents own bounded implementation. | The implementor may work only inside the approved layer boundary. |
+| Cleanup is an explicit layer kind. | It may occur anywhere dependencies allow; it skips test authoring and expected-red, but adds green-before/green-after and removal/reference checks. |
 | Artifacts are the memory of the run. | They contain the contract, evidence, and persistent decision log. Edit them only to change that meaning. |
 | Conductor decisions are authoritative. | Choose an option and add an optional comment in its gate. The flow synchronizes the resulting state into the artifact. |
 | Frontmatter is recovery context. | It is updated by workflow agents; do not maintain duplicated dashboard state by hand. It does not yet route a new run past completed phases. |
@@ -49,7 +56,12 @@ flowchart LR
 | `prompts/slice-run-starter.md` | Creates a slice-specific `00-requirements.md` after slice selection. |
 | `prompts/layer-mapper.md` | Writes `01-layer-map.md` and skeleton layer todos. |
 | `prompts/layer-todo-generator.md` | Details the selected layer todo, Gherkin, test ownership, and red-test gate. |
+| `prompts/cleanup-planner.md` | Details a selected cleanup layer and proves its supersession/preservation contract. |
+| `prompts/cleanup-implementor.md` | Removes only the approved private supersession chain. |
+| `prompts/cleanup-reviewer.md` | Reviews cleanup evidence without inventing implementation-coupled absence tests. |
 | `scripts/build-layer-context.py` | Derives bounded, hashed source projections for todo generation, test authoring, and implementation. |
+| `scripts/route-selected-layer.py` | Defaults missing `work_kind` to behavior and routes explicit cleanup layers separately. |
+| `scripts/check-cleanup-result.py` | Checks declared removal paths and bounded fixed-string references after cleanup. |
 | `scripts/run-verification.py` | Runs a verification command, stores complete output, and returns bounded evidence. |
 | `scripts/record-red-gate.py` | Deterministically records red-suite evidence and the human red/green decision. |
 | `scripts/capture-layer-snapshot.py` | Captures the exact pre-implementation Git tree, including uncommitted files. |
@@ -237,6 +249,8 @@ Prose should explain only what tables cannot: rationale, caveats, exact evidence
 | Requirements | `00-requirements.md` | One slice goal is clear and blockers are resolved or accepted. | You edited requirements or answered blockers in the file. | The slice is not worth doing. |
 | Layer selection | `01-layer-map.md` | One next layer is selected. | Boundaries, order, or skeleton todos are wrong. | You do not want to continue this slice. |
 | Layer todo | `layers/<nn>-<layer>.todo.md` | Gherkin, test ownership, and red-test gate are acceptable. | The contract, test mode, or red-test state is wrong. | The layer should not proceed. |
+| Cleanup plan | Cleanup todo with `work_kind: cleanup` | Replacement is active, consumers migrated, preservation tests exist, and exact removal/reference checks are bounded. | Any consumer, observable change, target, or safety evidence is unclear. | Cleanup should not proceed. |
+| Cleanup baseline | Bounded test/lint/security evidence | All three checks are green immediately before removal. | Revise if the cleanup contract caused the mismatch. | Existing failures cannot be resolved safely. |
 | Checkpoint | Active layer todo | The checkpoint is not actually new top-level behavior, or you chose a route. | Route to layer todo or layer selection if scope changed. | The contradiction blocks the slice. |
 | Layer approval | Active layer todo | Approve and choose another layer, or approve and final review. | Send back for focused fixes. | You want to pause after review. |
 | Memory | `99-final-review.md` | Capture approved candidates, or finish without capture. | The final review or memory candidates are wrong. | Not offered; use skip to finish. |
@@ -257,6 +271,32 @@ flowchart LR
 ```
 
 ## Frontmatter Rules
+
+### Layer work kind
+
+`work_kind` controls routing, not naming or ordering:
+
+| Value | Route | Test rule |
+| --- | --- | --- |
+| `behavior` or missing | Existing Gherkin → test author/existing test → expected-red → implementor → reviewer path. | Tests describe observable behavior. |
+| `cleanup` | Cleanup planner → green baseline → cleanup implementor → removal/reference checks → cleanup reviewer. | Do not add a permanent test that merely proves an old private implementation is absent or unused. Existing behavior tests stay; named implementation-coupled tests may be removed with obsolete code. |
+
+```mermaid
+flowchart LR
+    Select["Human selects any layer id"] --> Route{"work_kind"}
+    Route -- "behavior/default" --> TDD["normal layered TDD"]
+    Route -- "cleanup" --> Ready{"replacement active + consumers migrated + behavior covered?"}
+    Ready -- "no" --> Harden["separate behavior/test-hardening layer"]
+    Ready -- "yes" --> Green1["green baseline"]
+    Green1 --> Remove["bounded removal"]
+    Remove --> Exact["targets absent + bounded references absent"]
+    Exact --> Green2["green post-checks + review"]
+```
+
+Ordinary cleanup is limited to a private supersession chain. Public API,
+persisted data/schema, external events, compatibility windows, or cross-release
+retirement must use a behavior/migration layer. Mixed or unknown work fails
+closed to the behavior route.
 
 Every artifact should start with YAML frontmatter. Keep it boring, explicit, and small.
 

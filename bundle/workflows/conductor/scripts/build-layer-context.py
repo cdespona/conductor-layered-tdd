@@ -18,6 +18,8 @@ CONSUMER_BUDGETS = {
     "todo-generator": 12_000,
     "test-author": 16_000,
     "implementor": 20_000,
+    "cleanup-planner": 16_000,
+    "cleanup-implementor": 20_000,
 }
 CODE_PATH = re.compile(r"`([^`]+)`")
 FRONTMATTER_VALUE = re.compile(r"(?m)^(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?P<value>.+?)\s*$")
