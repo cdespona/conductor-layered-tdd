@@ -1,0 +1,106 @@
+flowchart TD
+  %% layered-tdd workflow
+
+  A([User request]) --> B[Requirements grill<br/>Blockers, non-blockers, slice detection]
+  B --> C{Multiple independently<br/>valuable slices?}
+
+  C -- yes --> D[Slice selection artifact<br/>Suggested slices and tradeoffs]
+  D --> E[Human selects exactly one slice]
+  E --> F[New slice-specific run]
+
+  C -- no --> F
+
+  F --> G[Slice requirements confirmation<br/>Selected goal, out-of-scope slices,<br/>blockers, assumptions]
+  G --> H[Layer map<br/>Real repo boundaries,<br/>recommended order,<br/>skeleton layer todos]
+  H --> I[Human selects next layer]
+  I --> J[Layer todo<br/>Top-level Gherkin proposals,<br/>layer-level ownership,<br/>red-test gate]
+
+  J --> K{Test ownership mode?}
+
+  K -- human-written --> L[Human writes top-level red tests]
+  L --> M[Red-test gate recorded]
+
+  K -- agent-written-after-approval --> N[Human approves Gherkin]
+  N --> O[Agent writes approved top-level tests]
+  O --> P[Human confirms tests]
+  P --> M
+
+  K -- waived --> Q[Human-approved waiver<br/>Final review must flag it]
+  Q --> M
+
+  M --> R{Allowed red-test<br/>gate state?}
+  R -- no --> J
+  R -- yes --> S[Implementor<br/>Production code plus internal TDD tests<br/>inside approved layer boundary]
+
+  S --> T{New top-level behavior<br/>or contradiction discovered?}
+  T -- yes --> U[Layer checkpoint<br/>Human decision required]
+  U --> U1{Human route}
+  U1 -- revise layer todo --> J
+  U1 -- select another layer --> I
+  U1 -- stop slice --> Z2([Stopped])
+
+  T -- no --> V[Verification<br/>Run tests, static checks, linters]
+  V --> W[Tiny layer review<br/>Scope check, tests run,<br/>waivers, risks]
+  W --> X[Human approves layer]
+  X --> Y{More layers?}
+
+  Y -- yes --> I
+  Y -- no --> Z[Slice final review<br/>All layers summary,<br/>end-to-end consistency,<br/>memory candidates]
+
+  Z --> AA{Human approves<br/>memory capture?}
+  AA -- yes --> AB[Existing memory skill/action<br/>captures approved memory]
+  AA -- no --> AC[Finish without memory capture]
+  AB --> AD([Done])
+  AC --> AD
+
+  %% Orchestrator responsibilities
+  subgraph ORCH[Thin orchestrator, cheap/free model]
+    O1[Reads artifact status]
+    O2[Records human selections]
+    O3[Dispatches specialist agents]
+    O4[Does not inspect code or make technical decisions]
+  end
+
+  %% Specialist responsibilities
+  subgraph AGENTS[Specialist agents]
+    G1[layered-tdd-griller<br/>Strong model]
+    G2[layered-tdd-layer-mapper<br/>Strong model]
+    G3[layered-tdd-layer-todo<br/>Strong model]
+    G4[layered-tdd-implementor<br/>Medium by default for small tested layers]
+    G5[layered-tdd-reviewer<br/>Strong model]
+  end
+
+  %% Notes
+  subgraph STATES[Allowed red-test gate states]
+    S1[observed-red]
+    S2[not-run-human-approved]
+    S3[already-passing-human-approved]
+    S4[waived]
+  end
+
+  subgraph PRINCIPLES[Principles]
+    P1[One workflow run equals one selected slice]
+    P2[Human gates top-level layer behavior]
+    P3[Agent owns internal TDD details inside approved boundary]
+    P4[Top-level tests are read-only by default]
+    P5[Memory capture requires human approval]
+  end
+
+  B -. too many slices stops flow .-> D
+  R -. otherwise blocked .-> J
+
+  classDef human fill:#e8f3ff,stroke:#1d6fd6,stroke-width:1px,color:#0b2341;
+  classDef agent fill:#eaf8ec,stroke:#2e8b45,stroke-width:1px,color:#102a16;
+  classDef impl fill:#fff1e6,stroke:#f97316,stroke-width:1px,color:#3b1a00;
+  classDef decision fill:#f4edff,stroke:#7c3aed,stroke-width:1px,color:#24113f;
+  classDef edge fill:#fff4f4,stroke:#dc2626,stroke-width:1px,color:#3b0a0a;
+  classDef memory fill:#f7f0ff,stroke:#8b5cf6,stroke-width:1px,color:#281047;
+  classDef note fill:#f8fafc,stroke:#64748b,stroke-width:1px,color:#0f172a;
+
+  class A,D,E,G,I,L,N,P,Q,W,X,AA,AC,AD human;
+  class B,H,J,Z,G1,G2,G3,G5 agent;
+  class S,G4 impl;
+  class C,K,R,T,U1,Y decision;
+  class U,Z2 edge;
+  class AB memory;
+  class ORCH,AGENTS,STATES,PRINCIPLES,O1,O2,O3,O4,S1,S2,S3,S4,P1,P2,P3,P4,P5 note;

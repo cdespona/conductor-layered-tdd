@@ -1,0 +1,1354 @@
+# Layered TDD workflow for Microsoft Conductor.
+#
+# Run:
+#   conductor run workflows/conductor/layered-tdd.yaml \
+#     --workspace-instructions \
+#     --web \
+#     --input request="Describe the code-changing task"
+#
+# This workflow assumes the Copilot provider and local repository tools are
+# available through Conductor/Copilot CLI.
+workflow:
+  name: layered-tdd
+  description: Requirements-first, layer-gated TDD workflow with human approvals.
+  version: "0.1.0"
+  entry_point: preflight_tests
+  runtime:
+    provider: copilot
+    default_model: gpt-5.4
+    default_reasoning_effort: medium
+  context:
+    # Durable artifacts are the handoff between stages. Do not replay every
+    # prior output (especially verification logs) into each model call.
+    mode: explicit
+  instructions:
+    - "This workflow is self-contained. Use the installed workflow prompts and any repo-local Conductor skills under `.github/skills/conductor-*/`; do not require LTDD documentation files to exist in the target repository."
+    - "Before code-changing agent work, check whether a relevant `.github/skills/conductor-<skill>/SKILL.md` exists and follow it when applicable."
+    - "If the Copilot CLI caveman skill is available, use caveman for planning notes, checkpoints, summaries, and human gate text. Keep artifact schemas, commands, paths, errors, and verification results exact and readable."
+    - "When graphify-out/graph.json exists, use Graphify only for bounded repository-navigation questions before opening returned source locations. Do not rebuild or update the graph from an agent prompt."
+  limits:
+    max_iterations: 80
+  input:
+    request:
+      type: string
+      required: true
+      description: The code-changing request to run through layered TDD.
+    task_slug:
+      type: string
+      required: false
+      description: Optional folder name under .github/plans/.
+    test_command:
+      type: string
+      required: false
+      default: make test
+      description: Command run before analysis and after implementation.
+    lint_command:
+      type: string
+      required: false
+      default: make lint
+      description: Command run before analysis and after implementation for lint/static checks.
+    security_command:
+      type: string
+      required: false
+      default: make audit
+      description: Command run before analysis and after implementation for dependency/CVE checks.
+    resume_path:
+      type: string
+      required: false
+      description: Optional existing .github/plans/<slug> folder to resume.
+    memory_vault:
+      type: string
+      required: false
+      description: Absolute path to the Markdown memory vault root. Required for memory capture.
+    memory_namespace:
+      type: string
+      required: false
+      default: machine/agent-memory
+      description: Markdown memory namespace under the vault root.
+    memory_project:
+      type: string
+      required: false
+      description: Markdown memory project slug. Required for memory capture.
+    graphify_scope:
+      type: string
+      required: false
+      description: Relative code directory used only when the human asks Graphify to build or refresh its graph. Leave empty to reuse the saved graph root for an existing graph.
+
+agents:
+  - name: preflight_tests
+    type: script
+    description: Run the test suite before spending model time on analysis.
+    command: sh
+    args:
+      - -lc
+      - "{{ workflow.input.test_command }}"
+    timeout: 600
+    routes:
+      - to: preflight_lint
+        when: "{{ output.exit_code == 0 }}"
+      - to: preflight_failure_gate
+
+  - name: preflight_lint
+    type: script
+    description: Run lint/static checks before analysis.
+    command: sh
+    args:
+      - -lc
+      - "{{ workflow.input.lint_command }}"
+    timeout: 600
+    routes:
+      - to: preflight_security
+        when: "{{ output.exit_code == 0 }}"
+      - to: preflight_failure_gate
+
+  - name: preflight_security
+    type: script
+    description: Run dependency/CVE checks before analysis.
+    command: sh
+    args:
+      - -lc
+      - "{{ workflow.input.security_command }}"
+    timeout: 600
+    routes:
+      - to: graphify_status
+        when: "{{ output.exit_code == 0 }}"
+      - to: preflight_failure_gate
+
+  - name: preflight_failure_gate
+    type: human_gate
+    prompt: |
+      A preflight command failed before requirements analysis. Fix the existing
+      regression/check failure, override the Make target, or stop the workflow.
+    options:
+      - label: I fixed the failing preflight command; rerun preflight.
+        value: retry
+        route: preflight_tests
+      - label: Continue anyway and record that preflight was waived.
+        value: continue_with_waiver
+        route: graphify_status
+      - label: Stop before requirements analysis.
+        value: stop
+        route: stopped
+
+  - name: graphify_status
+    type: script
+    description: Detect whether a reusable Graphify repository graph is available.
+    command: sh
+    args:
+      - -lc
+      - |
+        if [ -f graphify-out/graph.json ]; then
+          printf '{"graph_available":true,"summary":"Existing Graphify graph is available."}\n'
+        else
+          printf '{"graph_available":false,"summary":"No Graphify graph exists yet."}\n'
+        fi
+    routes:
+      - to: graphify_update_gate
+
+  - name: graphify_update_gate
+    type: human_gate
+    prompt: |
+      Decide whether repository navigation should use a refreshed Graphify graph
+      before requirements discovery. Graphify is optional; the Markdown
+      artifacts and your reviews remain the authoritative workflow handoff.
+
+      Current graph: {{ graphify_status.output.summary }}
+
+      For a first build, provide a focused code directory in the optional run
+      input `graphify_scope` (for example `src`, `internal`, or `packages/api`).
+      Do not use the repository root for a large mixed code-and-document corpus.
+    options:
+      - label: Build or incrementally refresh the focused Graphify graph.
+        value: refresh
+        route: graphify_refresh
+      - label: Use the existing graph without refreshing it.
+        value: use_existing
+        route: requirements_griller
+      - label: Continue without Graphify for this run.
+        value: skip
+        route: requirements_griller
+
+  - name: graphify_refresh
+    type: script
+    description: Build a focused Graphify code graph or incrementally refresh the existing one.
+    command: sh
+    args:
+      - -lc
+      - |
+        set -u
+        graph_file="graphify-out/graph.json"
+        graph_log="$(mktemp "${TMPDIR:-/tmp}/conductor-graphify.XXXXXX")"
+        scope="${GRAPHIFY_SCOPE:-}"
+
+        if [ -f "$graph_file" ] && [ -z "$scope" ] && [ -f graphify-out/.graphify_root ]; then
+          scope="$(cat graphify-out/.graphify_root)"
+        fi
+
+        if [ -z "$scope" ]; then
+          printf '{"graph_available":false,"refresh_succeeded":false,"reason":"missing_scope","log_path":"%s","summary":"Graphify needs graphify_scope for its first focused build."}\n' "$graph_log"
+          exit 0
+        fi
+        if [ ! -d "$scope" ]; then
+          printf '{"graph_available":false,"refresh_succeeded":false,"reason":"invalid_scope","log_path":"%s","summary":"graphify_scope is not a readable directory."}\n' "$graph_log"
+          exit 0
+        fi
+        if ! command -v graphify >/dev/null 2>&1; then
+          printf '{"graph_available":false,"refresh_succeeded":false,"reason":"graphify_unavailable","log_path":"%s","summary":"The graphify CLI is not installed or not on PATH."}\n' "$graph_log"
+          exit 0
+        fi
+
+        if [ -f "$graph_file" ]; then
+          graphify "$scope" --update --directed --no-viz >"$graph_log" 2>&1
+        else
+          graphify "$scope" --directed --no-viz >"$graph_log" 2>&1
+        fi
+        graphify_exit_code=$?
+
+        if [ "$graphify_exit_code" -eq 0 ] && [ -f "$graph_file" ]; then
+          printf '{"graph_available":true,"refresh_succeeded":true,"reason":"","log_path":"%s","summary":"Graphify graph is ready for bounded repository queries."}\n' "$graph_log"
+        else
+          printf '{"graph_available":false,"refresh_succeeded":false,"reason":"graphify_failed","log_path":"%s","summary":"Graphify did not produce a usable graph; inspect the Graphify log and choose a recovery option."}\n' "$graph_log"
+        fi
+    env:
+      GRAPHIFY_SCOPE: "{{ workflow.input.graphify_scope }}"
+    routes:
+      - to: requirements_griller
+        when: "{{ output.refresh_succeeded }}"
+      - to: graphify_refresh_failure_gate
+
+  - name: graphify_refresh_failure_gate
+    type: human_gate
+    prompt: |
+      Graphify could not prepare a usable graph before requirements discovery.
+
+      Result: {{ graphify_refresh.output.summary }}
+      Reason: `{{ graphify_refresh.output.reason }}`
+      Graphify log: `{{ graphify_refresh.output.log_path }}`
+
+      Correct the run input `graphify_scope` and restart if a first build needs
+      a narrower code directory. You can also continue safely without a graph.
+    options:
+      - label: Continue without Graphify for this run.
+        value: continue_without_graph
+        route: requirements_griller
+      - label: Stop and restart with a focused graphify_scope.
+        value: stop
+        route: stopped
+
+  - name: requirements_griller
+    description: Capture requirements, blockers, assumptions, and slice split.
+    model: gpt-5.4
+    reasoning:
+      effort: high
+    input:
+      - workflow.input.request
+      - workflow.input.resume_path?
+      - workflow.input.memory_vault?
+      - workflow.input.memory_namespace?
+      - workflow.input.memory_project?
+      - graphify_status.output.graph_available?
+      - graphify_status.output.summary?
+      - graphify_refresh.output.graph_available?
+      - graphify_refresh.output.summary?
+    prompt: !file prompts/requirements-griller.md
+    output:
+      artifact_path:
+        type: string
+        description: Path to the requirements or slice-selection artifact.
+      task_slug:
+        type: string
+        description: Current or recommended task slug.
+      multiple_slices:
+        type: boolean
+        description: True when the request contains multiple valuable slices.
+      blocker_count:
+        type: number
+        description: Number of unresolved blocker questions.
+      summary:
+        type: string
+        description: Short human-readable summary of what was produced.
+    routes:
+      - to: slice_selection_gate
+        when: "{{ output.multiple_slices }}"
+      - to: requirements_gate
+
+  - name: requirements_reviser
+    description: Reconcile human feedback into the originally created requirements artifact.
+    model: gpt-5.4
+    reasoning:
+      effort: high
+    input:
+      - requirements_griller.output.artifact_path
+    prompt: !file prompts/requirements-reviser.md
+    output:
+      artifact_path:
+        type: string
+        description: The same requirements artifact revised in place.
+      task_slug:
+        type: string
+        description: Unchanged task slug for the active requirements artifact.
+      blocker_count:
+        type: number
+        description: Number of unresolved blocker questions after revision.
+      summary:
+        type: string
+        description: Short human-readable summary of the revision.
+    routes:
+      - to: requirements_revision_gate
+
+  - name: slice_selection_gate
+    type: human_gate
+    prompt: |
+      Review the generated `slice-selection.md`, then select exactly one slice.
+
+      Discovery artifact: `{{ requirements_griller.output.artifact_path }}`
+      Discovery task slug: `{{ requirements_griller.output.task_slug }}`
+      Discovery summary: {{ requirements_griller.output.summary }}
+
+      The selected slice should start a fresh slice-specific run. Enter its id
+      in the gate comment; the next agent records it in the artifact.
+    options:
+      - label: I selected one slice and want a fresh slice-specific run.
+        value: selected
+        prompt_for: selected_slice_and_feedback
+        route: slice_run_starter
+      - label: Revise the slice split before continuing.
+        value: revise
+        prompt_for: feedback
+        route: slice_selection_reviser
+      - label: Stop this discovery run.
+        value: stop
+        route: stopped
+
+  - name: slice_run_starter
+    description: Create the slice-specific requirements artifact.
+    model: gpt-5.4
+    input:
+      - requirements_griller.output.artifact_path
+    prompt: !file prompts/slice-run-starter.md
+    output:
+      artifact_path:
+        type: string
+        description: Path to the slice-specific 00-requirements.md artifact.
+      slice_slug:
+        type: string
+        description: Slug for the selected slice.
+      blockers_remaining:
+        type: boolean
+        description: True if blocker questions still need human answers.
+      summary:
+        type: string
+        description: Short summary of the selected slice.
+    routes:
+      - to: slice_requirements_gate
+
+  - name: slice_selection_reviser
+    description: Reconcile human feedback into the originally created slice-selection artifact.
+    model: gpt-5.4
+    input:
+      - requirements_griller.output.artifact_path
+    prompt: !file prompts/slice-selection-reviser.md
+    output:
+      artifact_path:
+        type: string
+        description: The same slice-selection artifact revised in place.
+      task_slug:
+        type: string
+        description: Unchanged discovery task slug.
+      blocker_count:
+        type: number
+        description: Number of unresolved blocker questions after revision.
+      summary:
+        type: string
+        description: Short summary of the revised slice split.
+    routes:
+      - to: slice_selection_revision_gate
+
+  - name: slice_requirements_reviser
+    description: Reconcile human feedback into the selected slice requirements artifact.
+    model: gpt-5.4
+    reasoning:
+      effort: high
+    input:
+      - slice_run_starter.output.artifact_path
+    prompt: !file prompts/slice-requirements-reviser.md
+    output:
+      artifact_path:
+        type: string
+        description: The same selected-slice requirements artifact revised in place.
+      blocker_count:
+        type: number
+        description: Number of unresolved blocker questions after revision.
+      summary:
+        type: string
+        description: Short human-readable summary of the revision.
+    routes:
+      - to: slice_requirements_revision_gate
+
+  - name: requirements_gate
+    type: human_gate
+    prompt: |
+      Review `00-requirements.md`. Confirm the selected slice goal, blockers,
+      non-blocker assumptions, and explicitly out-of-scope work. If you edited
+      `00-requirements.md` or added feedback there, choose revise so the
+      pinned reviser can update that same artifact before mapping.
+
+      Requirements artifact: `{{ requirements_griller.output.artifact_path }}`
+      Task slug: `{{ requirements_griller.output.task_slug }}`
+      Blocker count: {{ requirements_griller.output.blocker_count }}
+      Summary: {{ requirements_griller.output.summary }}
+    options:
+      - label: Requirements are confirmed for one selected slice.
+        value: approve
+        prompt_for: feedback
+        route: layer_mapper
+      - label: I edited or commented on requirements; revise this same artifact.
+        value: revise
+        prompt_for: feedback
+        route: requirements_reviser
+      - label: Stop before layer mapping.
+        value: stop
+        route: stopped
+
+  - name: requirements_revision_gate
+    type: human_gate
+    prompt: |
+      Review the requirements revision. This is the same artifact as before;
+      it was revised in place rather than started as a new plan.
+
+      Requirements artifact: `{{ requirements_reviser.output.artifact_path }}`
+      Task slug: `{{ requirements_reviser.output.task_slug }}`
+      Blocker count: {{ requirements_reviser.output.blocker_count }}
+      Summary: {{ requirements_reviser.output.summary }}
+    options:
+      - label: Requirements are confirmed for this same slice.
+        value: approve
+        prompt_for: feedback
+        route: layer_mapper
+      - label: I edited or commented on requirements; revise this same artifact again.
+        value: revise
+        prompt_for: feedback
+        route: requirements_reviser
+      - label: Stop before layer mapping.
+        value: stop
+        route: stopped
+
+  - name: slice_requirements_gate
+    type: human_gate
+    prompt: |
+      Review the slice-specific `00-requirements.md`. Confirm the selected
+      slice goal, blockers, non-blocker assumptions, and explicitly out-of-scope
+      work. If you edited `00-requirements.md` or added feedback there, choose
+      revise so the pinned reviser can update that same artifact
+      before mapping.
+
+      Selected slice slug: `{{ slice_run_starter.output.slice_slug }}`
+      Requirements artifact: `{{ slice_run_starter.output.artifact_path }}`
+      Blockers remaining: {{ slice_run_starter.output.blockers_remaining }}
+      Summary: {{ slice_run_starter.output.summary }}
+    options:
+      - label: Requirements are confirmed for this selected slice.
+        value: approve
+        prompt_for: feedback
+        route: layer_mapper
+      - label: I edited or commented on requirements; revise this same artifact.
+        value: revise
+        prompt_for: feedback
+        route: slice_requirements_reviser
+      - label: Stop before layer mapping.
+        value: stop
+        route: stopped
+
+  - name: slice_selection_revision_gate
+    type: human_gate
+    prompt: |
+      Review the revised slice-selection artifact. It remains the active
+      discovery artifact; no fresh discovery plan was created.
+
+      Discovery artifact: `{{ slice_selection_reviser.output.artifact_path }}`
+      Discovery task slug: `{{ slice_selection_reviser.output.task_slug }}`
+      Blocker count: {{ slice_selection_reviser.output.blocker_count }}
+      Summary: {{ slice_selection_reviser.output.summary }}
+    options:
+      - label: I selected one slice and want a fresh slice-specific run.
+        value: selected
+        prompt_for: selected_slice_and_feedback
+        route: slice_run_starter
+      - label: Revise this same slice split again.
+        value: revise
+        prompt_for: feedback
+        route: slice_selection_reviser
+      - label: Stop this discovery run.
+        value: stop
+        route: stopped
+
+  - name: slice_requirements_revision_gate
+    type: human_gate
+    prompt: |
+      Review the selected-slice requirements revision. This is the same
+      artifact as before; it was revised in place rather than started anew.
+
+      Requirements artifact: `{{ slice_requirements_reviser.output.artifact_path }}`
+      Blocker count: {{ slice_requirements_reviser.output.blocker_count }}
+      Summary: {{ slice_requirements_reviser.output.summary }}
+    options:
+      - label: Requirements are confirmed for this same selected slice.
+        value: approve
+        prompt_for: feedback
+        route: layer_mapper
+      - label: I edited or commented on requirements; revise this same artifact again.
+        value: revise
+        prompt_for: feedback
+        route: slice_requirements_reviser
+      - label: Stop before layer mapping.
+        value: stop
+        route: stopped
+
+  - name: layer_mapper
+    description: Map real repository boundaries and skeleton layer todos.
+    model: gpt-5.4
+    reasoning:
+      effort: high
+    input:
+      - requirements_griller.output.artifact_path
+      - slice_run_starter.output.artifact_path?
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+    prompt: !file prompts/layer-mapper.md
+    output:
+      artifact_path:
+        type: string
+        description: Path to 01-layer-map.md.
+      layer_count:
+        type: number
+        description: Number of layers in the selected slice.
+      recommended_next_layer:
+        type: string
+        description: Recommended next layer identifier or todo filename.
+      summary:
+        type: string
+        description: Short layer map summary.
+    routes:
+      - to: layer_selection_gate
+
+  - name: layer_map_reviser
+    description: Reconcile human feedback into the active layer map.
+    model: gpt-5.4
+    reasoning:
+      effort: high
+    input:
+      - layer_mapper.output.artifact_path
+    prompt: !file prompts/layer-map-reviser.md
+    output:
+      artifact_path:
+        type: string
+        description: The same layer-map artifact revised in place.
+      layer_count:
+        type: number
+        description: Number of layers after revision.
+      recommended_next_layer:
+        type: string
+        description: Recommended next layer identifier or todo filename.
+      summary:
+        type: string
+        description: Short layer-map revision summary.
+    routes:
+      - to: layer_map_revision_gate
+
+  - name: layer_selection_gate
+    type: human_gate
+    prompt: |
+      Review `01-layer-map.md`, then choose the next layer to detail. Enter the
+      selected layer id in the gate field; the workflow records it in the
+      artifact before the todo agent runs.
+
+      Layer map artifact: `{{ layer_mapper.output.artifact_path }}`
+      Layer count: {{ layer_mapper.output.layer_count }}
+      {% if layer_reviewer is defined and layer_reviewer.output is defined and layer_reviewer.output.more_layers_remaining is defined and layer_reviewer.output.more_layers_remaining and layer_reviewer.output.recommended_next_layer is defined and layer_reviewer.output.recommended_next_layer %}
+      Recommended next layer: `{{ layer_reviewer.output.recommended_next_layer }}`
+      {% else %}
+      Recommended next layer: `{{ layer_mapper.output.recommended_next_layer }}`
+      {% endif %}
+      Summary: {{ layer_mapper.output.summary }}
+    options:
+      - label: I selected the next layer to run.
+        value: selected
+        prompt_for: selected_layer
+        route: layer_selection_recorder
+      - label: Revise the layer map before selecting a layer.
+        value: revise_map
+        prompt_for: feedback
+        route: layer_map_reviser
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: layer_map_revision_gate
+    type: human_gate
+    prompt: |
+      Review the layer-map revision. This is the same active slice folder;
+      the map and its skeleton todos were reconciled in place.
+
+      Layer map artifact: `{{ layer_map_reviser.output.artifact_path }}`
+      Layer count: {{ layer_map_reviser.output.layer_count }}
+      Recommended next layer: `{{ layer_map_reviser.output.recommended_next_layer }}`
+      Summary: {{ layer_map_reviser.output.summary }}
+    options:
+      - label: I selected the next layer to run.
+        value: selected
+        prompt_for: selected_layer
+        route: layer_map_revision_selection_recorder
+      - label: Revise this same layer map again.
+        value: revise_map
+        prompt_for: feedback
+        route: layer_map_reviser
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: layer_selection_recorder
+    type: script
+    description: Persist the selected layer before generating its todo.
+    input:
+      - layer_mapper.output.artifact_path
+      - layer_selection_gate.output.additional_input.selected_layer
+    command: python3
+    args:
+      - workflows/conductor/scripts/record-layer-selection.py
+      - "{{ layer_mapper.output.artifact_path }}"
+      - "{{ layer_selection_gate.output.additional_input.selected_layer }}"
+    routes:
+      - to: selected_layer_context
+
+  - name: layer_map_revision_selection_recorder
+    type: script
+    description: Persist the selected layer from the revised map before generating its todo.
+    input:
+      - layer_map_reviser.output.artifact_path
+      - layer_map_revision_gate.output.additional_input.selected_layer
+    command: python3
+    args:
+      - workflows/conductor/scripts/record-layer-selection.py
+      - "{{ layer_map_reviser.output.artifact_path }}"
+      - "{{ layer_map_revision_gate.output.additional_input.selected_layer }}"
+    routes:
+      - to: selected_layer_context
+
+  - name: selected_layer_context
+    type: script
+    description: Build a bounded context projection for the selected layer todo generator.
+    input:
+      - layer_mapper.output.artifact_path
+      - workflow.input.request
+    command: python3
+    args:
+      - workflows/conductor/scripts/build-layer-context.py
+      - --consumer
+      - todo-generator
+      - --map
+      - "{{ layer_mapper.output.artifact_path }}"
+      - --request
+      - "{{ workflow.input.request }}"
+    routes:
+      - to: layer_todo_generator
+
+  - name: layer_todo_generator
+    description: Detail the selected layer todo with Gherkin and TDD gate state.
+    model: gpt-5.4
+    reasoning:
+      effort: high
+    input:
+      - selected_layer_context.output.manifest_path
+      - selected_layer_context.output.selected_layer
+      - selected_layer_context.output.layer_map_path
+      - selected_layer_context.output.todo_path
+      - selected_layer_context.output.allowed_paths
+      - selected_layer_context.output.forbidden_paths
+      - selected_layer_context.output.read_only_paths
+      - selected_layer_context.output.production_files
+      - selected_layer_context.output.test_files
+      - selected_layer_context.output.source_context
+      - selected_layer_context.output.source_context_bytes
+      - selected_layer_context.output.source_context_truncated
+      - selected_layer_context.output.layer_map_excerpt
+      - selected_layer_context.output.layer_contract
+      - selected_layer_context.output.request_contract
+      - selected_layer_context.output.request_contract_truncated
+      - selected_layer_context.output.source_fingerprint
+      - workflow.input.test_command
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+    prompt: !file prompts/layer-todo-generator.md
+    output:
+      artifact_path:
+        type: string
+        description: Path to the selected layer todo.
+      selected_layer:
+        type: string
+        description: Selected layer identifier.
+      test_ownership:
+        type: string
+        description: human-written, agent-written-after-approval, or waived.
+      red_gate_state:
+        type: string
+        description: observed-red, not-run-human-approved, already-passing-human-approved, waived, or blocked.
+      ready_for_implementation:
+        type: boolean
+        description: True only when the layer has an allowed red-test gate state.
+      summary:
+        type: string
+        description: Short summary of the layer todo.
+    routes:
+      - to: layer_todo_gate
+
+  - name: layer_todo_reviser
+    description: Reconcile human or checkpoint feedback into the active layer todo.
+    model: gpt-5.4
+    reasoning:
+      effort: high
+    input:
+      - layer_todo_generator.output.artifact_path
+    prompt: !file prompts/layer-todo-reviser.md
+    output:
+      artifact_path:
+        type: string
+        description: The same layer todo revised in place.
+      selected_layer:
+        type: string
+        description: Unchanged selected layer identifier.
+      test_ownership:
+        type: string
+        description: human-written, agent-written-after-approval, or waived.
+      red_gate_state:
+        type: string
+        description: Red-test gate state after revision.
+      ready_for_implementation:
+        type: boolean
+        description: True only when the revised todo has an allowed red-test state.
+      summary:
+        type: string
+        description: Short layer-todo revision summary.
+    routes:
+      - to: layer_todo_revision_gate
+
+  - name: layer_todo_gate
+    type: human_gate
+    prompt: |
+      Review the selected layer todo. Approve the Gherkin and test ownership.
+      The workflow then runs the configured full test suite as the deterministic
+      red-test check before production implementation.
+
+      Selected layer: `{{ layer_todo_generator.output.selected_layer }}`
+      Layer todo artifact: `{{ layer_todo_generator.output.artifact_path }}`
+      Test ownership: `{{ layer_todo_generator.output.test_ownership }}`
+      Red-test gate state: `{{ layer_todo_generator.output.red_gate_state }}`
+      Ready for implementation: {{ layer_todo_generator.output.ready_for_implementation }}
+      Summary: {{ layer_todo_generator.output.summary }}
+    options:
+      - label: Gherkin is approved; have the agent author the top-level test.
+        value: author_agent_test
+        prompt_for: feedback
+        route: test_author_context
+      - label: Gherkin is approved; verify the existing top-level test with the full suite.
+        value: verify_existing_test
+        prompt_for: feedback
+        route: red_suite_verifier
+      - label: Revise the layer todo or gate state.
+        value: revise
+        prompt_for: feedback
+        route: layer_todo_reviser
+      - label: Go back to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: layer_todo_revision_gate
+    type: human_gate
+    prompt: |
+      Review the layer-todo revision. This is the same active todo, revised in
+      place; it is not a new layer or a new plan folder.
+
+      Selected layer: `{{ layer_todo_reviser.output.selected_layer }}`
+      Layer todo artifact: `{{ layer_todo_reviser.output.artifact_path }}`
+      Test ownership: `{{ layer_todo_reviser.output.test_ownership }}`
+      Red-test gate state: `{{ layer_todo_reviser.output.red_gate_state }}`
+      Ready for implementation: {{ layer_todo_reviser.output.ready_for_implementation }}
+      Summary: {{ layer_todo_reviser.output.summary }}
+    options:
+      - label: Gherkin is approved; have the agent author the top-level test.
+        value: author_agent_test
+        prompt_for: feedback
+        route: test_author_context
+      - label: Gherkin is approved; verify the existing top-level test with the full suite.
+        value: verify_existing_test
+        prompt_for: feedback
+        route: red_suite_verifier
+      - label: Revise this same layer todo or gate state again.
+        value: revise
+        prompt_for: feedback
+        route: layer_todo_reviser
+      - label: Go back to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: test_author_context
+    type: script
+    description: Refresh the bounded context projection for the approved test author.
+    input:
+      - layer_todo_generator.output.artifact_path
+      - workflow.input.request
+    command: python3
+    args:
+      - workflows/conductor/scripts/build-layer-context.py
+      - --consumer
+      - test-author
+      - --todo
+      - "{{ layer_todo_generator.output.artifact_path }}"
+      - --request
+      - "{{ workflow.input.request }}"
+    routes:
+      - to: agent_test_author
+
+  - name: agent_test_author
+    description: Author the approved top-level test without changing production code.
+    model: gpt-5.4
+    input:
+      - test_author_context.output.manifest_path
+      - test_author_context.output.selected_layer
+      - test_author_context.output.layer_map_path
+      - test_author_context.output.todo_path
+      - test_author_context.output.allowed_paths
+      - test_author_context.output.forbidden_paths
+      - test_author_context.output.read_only_paths
+      - test_author_context.output.production_files
+      - test_author_context.output.test_files
+      - test_author_context.output.source_context
+      - test_author_context.output.source_context_bytes
+      - test_author_context.output.source_context_truncated
+      - test_author_context.output.layer_contract
+      - test_author_context.output.request_contract
+      - test_author_context.output.request_contract_truncated
+      - test_author_context.output.source_fingerprint
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+    reasoning:
+      effort: high
+    prompt: !file prompts/agent-test-author.md
+    output:
+      selected_layer:
+        type: string
+        description: Layer whose approved top-level test was authored.
+      test_files_modified:
+        type: array
+        description: Top-level test files created or changed; production files are excluded.
+      checkpoint_required:
+        type: boolean
+        description: True when authoring the approved test exposed new top-level behavior or a contradiction.
+      checkpoint_summary:
+        type: string
+        description: Checkpoint details if human routing is required.
+      summary:
+        type: string
+        description: Test-authoring summary with no production implementation.
+    routes:
+      - to: agent_test_checkpoint_gate
+        when: "{{ output.checkpoint_required }}"
+      - to: red_suite_verifier
+
+  - name: red_suite_verifier
+    type: script
+    description: Run the configured full suite and emit bounded expected-red evidence without failing the workflow.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - red-suite
+      - --command
+      - "{{ workflow.input.test_command }}"
+    timeout: 600
+    routes:
+      - to: red_suite_evidence_recorder
+
+  - name: red_suite_evidence_recorder
+    type: script
+    description: Persist full-suite red-gate evidence in the active layer todo.
+    input:
+      - layer_todo_generator.output.artifact_path
+      - red_suite_verifier.output.evidence_path
+      - red_suite_verifier.output.exit_code
+      - red_suite_verifier.output.output_bytes
+      - red_suite_verifier.output.bounded_excerpt
+      - workflow.input.test_command
+    command: python3
+    args:
+      - workflows/conductor/scripts/record-red-gate.py
+      - evidence
+      - --artifact
+      - "{{ layer_todo_generator.output.artifact_path }}"
+      - --command
+      - "{{ workflow.input.test_command }}"
+      - --exit-code
+      - "{{ red_suite_verifier.output.exit_code }}"
+      - --evidence-path
+      - "{{ red_suite_verifier.output.evidence_path }}"
+      - --output-bytes
+      - "{{ red_suite_verifier.output.output_bytes }}"
+      - --excerpt
+      - "{{ red_suite_verifier.output.bounded_excerpt }}"
+    routes:
+      - to: red_suite_evidence_gate
+
+  - name: red_suite_evidence_gate
+    type: human_gate
+    prompt: |
+      Review the deterministic full-suite result before any production work.
+      The decision and optional comment below are written to the active todo
+      automatically; do not edit frontmatter or a dashboard by hand.
+
+      Active layer todo: `{{ layer_todo_generator.output.artifact_path }}`
+      Full-suite command: `{{ workflow.input.test_command }}`
+      Exit code: {{ red_suite_verifier.output.exit_code }}
+      Evidence: `{{ red_suite_verifier.output.evidence_path }}`
+      Summary: {{ red_suite_evidence_recorder.output.summary }}
+    options:
+      - label: The full-suite failure is the expected red evidence; implement.
+        value: confirm_red
+        prompt_for: feedback
+        route: red_gate_decision_recorder
+      - label: The full suite is green; accept the existing coverage and implement.
+        value: accept_green
+        prompt_for: feedback
+        route: red_gate_decision_recorder
+      - label: Revise the same layer todo or test contract.
+        value: revise
+        prompt_for: feedback
+        route: layer_todo_reviser
+      - label: Go back to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: red_gate_decision_recorder
+    type: script
+    description: Persist the human red-gate decision and route only when implementation is allowed.
+    input:
+      - layer_todo_generator.output.artifact_path
+      - red_suite_verifier.output.evidence_path
+      - red_suite_verifier.output.exit_code
+      - red_suite_evidence_gate.output.selected
+      - red_suite_evidence_gate.output.additional_input.feedback?
+      - workflow.input.test_command
+    command: python3
+    args:
+      - workflows/conductor/scripts/record-red-gate.py
+      - decision
+      - --artifact
+      - "{{ layer_todo_generator.output.artifact_path }}"
+      - --selection
+      - "{{ red_suite_evidence_gate.output.selected }}"
+      - --feedback
+      - '{{ red_suite_evidence_gate.output.additional_input.feedback | default("") }}'
+      - --command
+      - "{{ workflow.input.test_command }}"
+      - --exit-code
+      - "{{ red_suite_verifier.output.exit_code }}"
+      - --evidence-path
+      - "{{ red_suite_verifier.output.evidence_path }}"
+    routes:
+      - to: implementation_context
+        when: "{{ output.proceed }}"
+      - to: layer_todo_reviser
+
+  - name: agent_test_checkpoint_gate
+    type: human_gate
+    prompt: |
+      The test author found a top-level contract issue before production work.
+      Choose how to route it before authoring or changing any further tests.
+
+      Selected layer: `{{ agent_test_author.output.selected_layer }}`
+      Active layer todo: `{{ layer_todo_generator.output.artifact_path }}`
+      Checkpoint summary: {{ agent_test_author.output.checkpoint_summary }}
+    options:
+      - label: Revise the current layer todo.
+        value: revise_layer_todo
+        prompt_for: feedback
+        route: layer_todo_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: implementation_context
+    type: script
+    description: Refresh the bounded context projection immediately before implementation.
+    input:
+      - layer_todo_generator.output.artifact_path
+      - workflow.input.request
+    command: python3
+    args:
+      - workflows/conductor/scripts/build-layer-context.py
+      - --consumer
+      - implementor
+      - --todo
+      - "{{ layer_todo_generator.output.artifact_path }}"
+      - --request
+      - "{{ workflow.input.request }}"
+    routes:
+      - to: layer_snapshot
+
+  - name: implementor
+    description: Implement only inside the approved layer boundary.
+    model: gpt-5.4
+    input:
+      - implementation_context.output.manifest_path
+      - implementation_context.output.selected_layer
+      - implementation_context.output.layer_map_path
+      - implementation_context.output.todo_path
+      - implementation_context.output.allowed_paths
+      - implementation_context.output.forbidden_paths
+      - implementation_context.output.read_only_paths
+      - implementation_context.output.production_files
+      - implementation_context.output.test_files
+      - implementation_context.output.source_context
+      - implementation_context.output.source_context_bytes
+      - implementation_context.output.source_context_truncated
+      - implementation_context.output.layer_contract
+      - implementation_context.output.request_contract
+      - implementation_context.output.request_contract_truncated
+      - implementation_context.output.source_fingerprint
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+    prompt: !file prompts/implementor.md
+    output:
+      selected_layer:
+        type: string
+        description: Layer implemented.
+      files_modified:
+        type: array
+        description: Files created or changed.
+      internal_tests_added:
+        type: array
+        description: Internal tests added inside the approved boundary.
+      checkpoint_required:
+        type: boolean
+        description: True when new top-level behavior or contradiction was found.
+      checkpoint_summary:
+        type: string
+        description: Checkpoint details if human routing is required.
+      summary:
+        type: string
+        description: Implementation summary.
+    routes:
+      - to: checkpoint_gate
+        when: "{{ output.checkpoint_required }}"
+      - to: verification_tests
+
+  - name: layer_snapshot
+    type: script
+    description: Capture the exact working tree immediately before this layer is implemented.
+    command: python3
+    args:
+      - workflows/conductor/scripts/capture-layer-snapshot.py
+    routes:
+      - to: implementor
+
+  - name: checkpoint_gate
+    type: human_gate
+    prompt: |
+      The implementor found new top-level behavior or a contradiction. Choose how
+      to route the checkpoint before any more production work.
+
+      Selected layer: `{{ implementor.output.selected_layer }}`
+      Active layer todo: `{{ layer_todo_generator.output.artifact_path }}`
+      Checkpoint summary: {{ implementor.output.checkpoint_summary }}
+    options:
+      - label: Revise the current layer todo.
+        value: revise_layer_todo
+        prompt_for: feedback
+        route: layer_todo_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Proceed because this is not actually new top-level behavior.
+        value: proceed
+        prompt_for: feedback
+        route: verification_tests
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: verification_tests
+    type: script
+    description: Run the configured test command and retain complete evidence outside the reviewer prompt.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - verification-tests
+      - --command
+      - "{{ workflow.input.test_command }}"
+    timeout: 600
+    routes:
+      - to: verification_lint
+
+  - name: verification_lint
+    type: script
+    description: Run lint/static checks and retain complete evidence outside the reviewer prompt.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - verification-lint
+      - --command
+      - "{{ workflow.input.lint_command }}"
+    timeout: 600
+    routes:
+      - to: verification_security
+
+  - name: verification_security
+    type: script
+    description: Run dependency/CVE checks and retain complete evidence outside the reviewer prompt.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - verification-security
+      - --command
+      - "{{ workflow.input.security_command }}"
+    timeout: 600
+    routes:
+      - to: layer_diff
+
+  - name: layer_diff
+    type: script
+    description: Build a bounded layer-only patch and classify changed paths against the approved boundary.
+    input:
+      - layer_snapshot.output.snapshot_tree
+      - layer_todo_generator.output.artifact_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/create-layer-diff.py
+      - --snapshot-tree
+      - "{{ layer_snapshot.output.snapshot_tree }}"
+      - --todo
+      - "{{ layer_todo_generator.output.artifact_path }}"
+    routes:
+      - to: layer_reviewer
+
+  - name: layer_reviewer
+    description: Review one completed layer and record risks or gaps.
+    model: gpt-5.4
+    reasoning:
+      effort: high
+    input:
+      - layer_todo_generator.output.artifact_path
+      - verification_tests.output.exit_code
+      - verification_tests.output.duration_ms
+      - verification_tests.output.passed_count
+      - verification_tests.output.failed_count
+      - verification_tests.output.failed_test_names
+      - verification_tests.output.bounded_excerpt
+      - verification_tests.output.evidence_path
+      - verification_tests.output.output_bytes
+      - verification_tests.output.summary_truncated
+      - verification_lint.output.exit_code
+      - verification_lint.output.duration_ms
+      - verification_lint.output.passed_count
+      - verification_lint.output.failed_count
+      - verification_lint.output.failed_test_names
+      - verification_lint.output.bounded_excerpt
+      - verification_lint.output.evidence_path
+      - verification_lint.output.output_bytes
+      - verification_lint.output.summary_truncated
+      - verification_security.output.exit_code
+      - verification_security.output.duration_ms
+      - verification_security.output.passed_count
+      - verification_security.output.failed_count
+      - verification_security.output.failed_test_names
+      - verification_security.output.bounded_excerpt
+      - verification_security.output.evidence_path
+      - verification_security.output.output_bytes
+      - verification_security.output.summary_truncated
+      - layer_diff.output.changed_files
+      - layer_diff.output.bounded_patch
+      - layer_diff.output.patch_path
+      - layer_diff.output.patch_bytes
+      - layer_diff.output.patch_truncated
+      - layer_diff.output.boundary_status
+      - layer_diff.output.boundary_violations
+      - layer_diff.output.allowed_paths
+      - layer_diff.output.forbidden_paths
+      - layer_diff.output.boundary_exempt_paths
+      - implementation_context.output.request_contract
+      - workflow.input.test_command
+      - workflow.input.lint_command
+      - workflow.input.security_command
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+    prompt: !file prompts/layer-reviewer.md
+    output:
+      artifact_path:
+        type: string
+        description: Path updated by the layer review.
+      approved_recommendation:
+        type: boolean
+        description: Whether the reviewer recommends human approval.
+      more_layers_remaining:
+        type: boolean
+        description: Whether unfinished layers remain.
+      recommended_next_layer:
+        type: string
+        description: First eligible unfinished layer after the reviewed layer, or empty when none remain.
+      issues:
+        type: array
+        description: Specific issues, risks, or verification gaps.
+      summary:
+        type: string
+        description: Layer review summary.
+    routes:
+      - to: layer_approval_gate
+
+  - name: layer_approval_gate
+    type: human_gate
+    prompt: |
+      Review the layer result and the reviewer notes. Approve the layer, request
+      a focused fix, select another layer, or finish the slice.
+
+      Implemented layer: `{{ implementor.output.selected_layer }}`
+      Reviewed artifact: `{{ layer_reviewer.output.artifact_path }}`
+      Approval recommended: {{ layer_reviewer.output.approved_recommendation }}
+      More layers remaining: {{ layer_reviewer.output.more_layers_remaining }}
+      Review issues: {{ layer_reviewer.output.issues }}
+      Summary: {{ layer_reviewer.output.summary }}
+    options:
+      - label: Approve this layer and choose another layer.
+        value: approve_more_layers
+        prompt_for: feedback
+        route: layer_selection_gate
+      - label: Approve this layer and run final slice review.
+        value: approve_final_review
+        prompt_for: feedback
+        route: final_reviewer
+      - label: Send the layer back to the implementor for focused fixes.
+        value: request_fixes
+        prompt_for: feedback
+        route: implementation_context
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: final_reviewer
+    description: Review the whole selected slice and propose memory candidates.
+    model: gpt-5.4
+    reasoning:
+      effort: high
+    input:
+      - layer_mapper.output.artifact_path
+    prompt: !file prompts/final-reviewer.md
+    output:
+      artifact_path:
+        type: string
+        description: Path to 99-final-review.md.
+      memory_candidates:
+        type: array
+        description: Proposed memory candidates.
+      residual_risks:
+        type: array
+        description: Residual risks or verification gaps.
+      ready_to_finish:
+        type: boolean
+        description: Whether the slice is ready to finish.
+      summary:
+        type: string
+        description: Final review summary.
+    routes:
+      - to: memory_gate
+
+  - name: memory_gate
+    type: human_gate
+    prompt: |
+      Review `99-final-review.md`. Approve only the memory candidates worth
+      capturing with the repository's existing memory workflow.
+
+      Final review artifact: `{{ final_reviewer.output.artifact_path }}`
+      Ready to finish: {{ final_reviewer.output.ready_to_finish }}
+      Residual risks: {{ final_reviewer.output.residual_risks }}
+      Memory candidates: {{ final_reviewer.output.memory_candidates }}
+      Summary: {{ final_reviewer.output.summary }}
+    options:
+      - label: Capture approved memory candidates separately.
+        value: capture
+        prompt_for: feedback
+        route: memory_capturer
+      - label: Finish without memory capture.
+        value: skip
+        prompt_for: feedback
+        route: done
+      - label: Revise the final review first.
+        value: revise_review
+        prompt_for: feedback
+        route: final_reviewer
+
+  - name: memory_capturer
+    description: Persist human-approved memory candidates from the final review.
+    model: gpt-5.4-mini
+    reasoning:
+      effort: low
+    input:
+      - final_reviewer.output.artifact_path
+      - layer_mapper.output.artifact_path
+      - workflow.input.memory_vault?
+      - workflow.input.memory_namespace?
+      - workflow.input.memory_project?
+    prompt: !file prompts/memory-capturer.md
+    output:
+      artifact_path:
+        type: string
+        description: Path to the final review artifact that was processed.
+      captured_count:
+        type: number
+        description: Number of memory candidates captured or staged.
+      capture_backend:
+        type: string
+        description: Memory backend used, either markdown or unavailable.
+      capture_artifacts:
+        type: array
+        description: Observation IDs, topic keys, or markdown files written.
+      summary:
+        type: string
+        description: Short memory capture summary.
+    routes:
+      - to: done
+
+  - name: stopped
+    type: terminate
+    status: success
+    reason: Human stopped the layered TDD workflow.
+    output_template:
+      status: stopped
+      reason: Human stopped the layered TDD workflow.
+
+  - name: done
+    type: terminate
+    status: success
+    input:
+      - requirements_griller.output.artifact_path?
+      - layer_mapper.output.artifact_path?
+      - layer_todo_generator.output.artifact_path?
+      - final_reviewer.output.artifact_path?
+    reason: Layered TDD slice complete.
+    output_template:
+      status: complete
+      requirements_artifact: "{{ requirements_griller.output.artifact_path }}"
+      layer_map: "{{ layer_mapper.output.artifact_path }}"
+      last_layer_todo: "{{ layer_todo_generator.output.artifact_path }}"
+      final_review: "{{ final_reviewer.output.artifact_path }}"

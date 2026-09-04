@@ -1,0 +1,15 @@
+============================================================
+Token Usage Summary
+  Input:  1,051,123 tokens
+  Output: 6,399 tokens
+  Total:  1,057,522 tokens
+
+Cost Breakdown:
+  requirements_griller: $0.1181 (6%)
+  layer_mapper: $0.1585 (9%)
+  implementor: $0.0912 (5%)
+  implementor: $0.1040 (6%)
+  implementor: $0.1459 (8%)
+  final_reviewer: $0.0787 (4%)
+  Total: $1.8558
+============================================================

@@ -1,0 +1,153 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+benchmark_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+repository_dir=$(CDPATH= cd -- "$benchmark_dir/../.." && pwd)
+
+variant=control
+destination=
+workflow_dir="$repository_dir/bundle/workflows/conductor"
+case_name=idempotent-cancellation
+test_command="make test"
+build_graph=false
+diagnostic_layer=
+run_kind=full
+run_layers_json='["L10-domain", "L20-service", "L30-http"]'
+claim_eligible=true
+
+usage() {
+  printf '%s\n' "usage: materialize [--variant NAME] [--destination PATH] [--workflow PATH] [--case NAME] [--noisy] [--graphify] [--diagnostic-layer L10-domain]"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --variant)
+      variant=$2
+      shift 2
+      ;;
+    --destination)
+      destination=$2
+      shift 2
+      ;;
+    --workflow)
+      workflow_dir=$2
+      shift 2
+      ;;
+    --case)
+      case_name=$2
+      shift 2
+      ;;
+    --noisy)
+      test_command="make test-noisy"
+      shift
+      ;;
+    --graphify)
+      build_graph=true
+      shift
+      ;;
+    --diagnostic-layer)
+      diagnostic_layer=$2
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'unknown argument: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ -n "$diagnostic_layer" ]; then
+  if [ "$diagnostic_layer" != "L10-domain" ]; then
+    printf 'unsupported diagnostic layer: %s (supported: L10-domain)\n' "$diagnostic_layer" >&2
+    exit 2
+  fi
+  run_kind=one-layer-diagnostic
+  run_layers_json='["L10-domain"]'
+  claim_eligible=false
+fi
+
+case_dir="$benchmark_dir/cases/$case_name"
+if [ ! -f "$case_dir/request.md" ]; then
+  printf 'benchmark case not found: %s\n' "$case_dir" >&2
+  exit 1
+fi
+if [ ! -f "$workflow_dir/layered-tdd.yaml" ]; then
+  printf 'workflow directory is incomplete: %s\n' "$workflow_dir" >&2
+  exit 1
+fi
+
+if [ -z "$destination" ]; then
+  destination=$(mktemp -d "${TMPDIR:-/tmp}/layered-tdd-benchmark.XXXXXX")
+else
+  if [ -e "$destination" ]; then
+    printf 'destination already exists; refusing to overwrite: %s\n' "$destination" >&2
+    exit 1
+  fi
+  mkdir -p "$destination"
+fi
+
+cp -R "$benchmark_dir/fixture/." "$destination/"
+mkdir -p "$destination/workflows" "$destination/.benchmark"
+cp -R "$workflow_dir" "$destination/workflows/conductor"
+cp "$case_dir/request.md" "$destination/.benchmark/request.md"
+cp "$case_dir/gates.md" "$destination/.benchmark/gates.md"
+
+cat >"$destination/.benchmark/case.json" <<EOF
+{
+  "case": "$case_name",
+  "variant": "$variant",
+  "expected_layers": 3,
+  "run_kind": "$run_kind",
+  "run_layers": $run_layers_json,
+  "claim_eligible": $claim_eligible,
+  "test_command": "$test_command",
+  "graphify": $build_graph
+}
+EOF
+
+(
+  cd "$destination"
+  git init -q
+  git config user.name "Layered TDD Benchmark"
+  git config user.email "benchmark@example.invalid"
+  git add .
+  git commit -qm "Benchmark baseline"
+)
+
+if [ "$build_graph" = true ]; then
+  if ! command -v graphify >/dev/null 2>&1; then
+    printf 'graphify is required for --graphify but is not available\n' >&2
+    exit 1
+  fi
+  (
+    cd "$destination"
+    graphify internal --directed --no-viz
+  )
+  if [ -f "$destination/internal/graphify-out/graph.json" ]; then
+    python3 "$script_dir/normalize-graph.py" "$destination/internal/graphify-out/graph.json" internal
+  fi
+  if [ ! -f "$destination/graphify-out/graph.json" ] && [ -f "$destination/internal/graphify-out/graph.json" ]; then
+    ln -s internal/graphify-out "$destination/graphify-out"
+  fi
+  if [ ! -f "$destination/graphify-out/graph.json" ]; then
+    printf 'graphify completed without the root graph expected by the workflow\n' >&2
+    exit 1
+  fi
+fi
+
+printf 'BENCHMARK_PROJECT_DIR=%s\n' "$destination"
+printf 'BENCHMARK_VARIANT=%s\n' "$variant"
+printf 'BENCHMARK_RUN_KIND=%s\n' "$run_kind"
+printf 'BENCHMARK_RUN_LAYERS=%s\n' "$run_layers_json"
+printf 'BENCHMARK_CLAIM_ELIGIBLE=%s\n' "$claim_eligible"
+printf 'BENCHMARK_BASE_COMMIT=%s\n' "$(git -C "$destination" rev-parse HEAD)"
+printf '\nRun from the generated project:\n\n'
+printf 'cd %s\n' "$destination"
+printf 'conductor run workflows/conductor/layered-tdd.yaml --workspace-instructions --web --log-file auto --input task_slug="benchmark-idempotent-cancellation" --input test_command="%s" --input lint_command="make lint" --input security_command="make audit" --input request="$(cat .benchmark/request.md)"\n' "$test_command"
+printf '\nGate playbook: %s\n' "$destination/.benchmark/gates.md"

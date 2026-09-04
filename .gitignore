@@ -1,0 +1,7 @@
+/ltdd
+/dist/
+/.idea/
+/.DS_Store
+__pycache__/
+*.pyc
+graphify-out/

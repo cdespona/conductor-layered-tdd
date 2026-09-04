@@ -1,0 +1,436 @@
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import os
+import subprocess
+import tempfile
+import unittest
+from contextlib import contextmanager
+from pathlib import Path
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+WORKFLOW_ROOT = REPOSITORY_ROOT / "bundle" / "workflows" / "conductor"
+SCRIPTS = WORKFLOW_ROOT / "scripts"
+WORKFLOW = WORKFLOW_ROOT / "layered-tdd.yaml"
+REVIEWER = WORKFLOW_ROOT / "prompts" / "layer-reviewer.md"
+TODO_GENERATOR = WORKFLOW_ROOT / "prompts" / "layer-todo-generator.md"
+TEST_AUTHOR = WORKFLOW_ROOT / "prompts" / "agent-test-author.md"
+IMPLEMENTOR = WORKFLOW_ROOT / "prompts" / "implementor.md"
+
+
+def load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+verification = load_module("run_verification", SCRIPTS / "run-verification.py")
+red_gate = load_module("record_red_gate", SCRIPTS / "record-red-gate.py")
+snapshot = load_module("capture_layer_snapshot", SCRIPTS / "capture-layer-snapshot.py")
+layer_diff = load_module("create_layer_diff", SCRIPTS / "create-layer-diff.py")
+layer_context = load_module("build_layer_context", SCRIPTS / "build-layer-context.py")
+
+
+@contextmanager
+def working_directory(path: Path):
+    previous = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
+
+
+def todo_text() -> str:
+    return """---
+status: draft
+owner: agent
+red_gate_state: missing
+---
+
+# Layer L10
+
+## Behavior Contract
+
+Given a pending order
+
+## Evidence
+
+Pending.
+
+## Implementation Boundary
+
+| Area | Allowed? | Notes |
+| --- | --- | --- |
+| `src/` | yes | production |
+| `legacy/` | forbidden | do not touch |
+
+## Decision Log
+
+| Decision | Comment | Command/evidence | Timestamp |
+| --- | --- | --- | --- |
+"""
+
+
+class VerificationEvidenceTests(unittest.TestCase):
+    def test_retains_full_output_but_bounds_the_summary_by_bytes(self) -> None:
+        result = verification.run(
+            "python3 -c 'import sys; print(\"x\" * 12000); print(\"FAIL TestBounded\", file=sys.stderr); sys.exit(1)'",
+            "unit",
+            512,
+        )
+        evidence = Path(str(result["evidence_path"]))
+        try:
+            self.assertEqual(result["exit_code"], 1)
+            self.assertTrue(result["summary_truncated"])
+            self.assertLessEqual(result["excerpt_bytes"], 512)
+            self.assertGreater(result["output_bytes"], 12_000)
+            self.assertIn("FAIL TestBounded", evidence.read_text(encoding="utf-8"))
+        finally:
+            evidence.unlink(missing_ok=True)
+
+    def test_tolerates_utf8_at_the_excerpt_boundary(self) -> None:
+        excerpt, truncated = verification.bounded_excerpt("é" * 20, "", 9)
+        self.assertTrue(truncated)
+        self.assertLessEqual(len(excerpt.encode("utf-8")), 9)
+
+
+class RedGateRecorderTests(unittest.TestCase):
+    def test_records_evidence_without_granting_implementation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            todo = Path(directory) / "layer.todo.md"
+            todo.write_text(todo_text(), encoding="utf-8")
+            result = red_gate.record_evidence(
+                argparse.Namespace(
+                    artifact=str(todo),
+                    command="go test ./...",
+                    exit_code=1,
+                    evidence_path="/tmp/full.log",
+                    output_bytes=9000,
+                    excerpt="FAIL TestCancel",
+                )
+            )
+            content = todo.read_text(encoding="utf-8")
+
+        self.assertIn("status: needs-human-test-gate", content)
+        self.assertIn("owner: human", content)
+        self.assertIn("red_gate_state: blocked", content)
+        self.assertIn("FAIL TestCancel", content)
+        self.assertIn("9000", content)
+        self.assertEqual(result["artifact_path"], str(todo))
+
+    def test_creates_evidence_section_when_runtime_todo_omits_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            todo = Path(directory) / "layer.todo.md"
+            content_without_evidence = todo_text().replace(
+                "## Evidence\n\nPending.\n\n", ""
+            )
+            todo.write_text(content_without_evidence, encoding="utf-8")
+            result = red_gate.record_evidence(
+                argparse.Namespace(
+                    artifact=str(todo),
+                    command="make test-noisy",
+                    exit_code=2,
+                    evidence_path="/tmp/full.log",
+                    output_bytes=50310,
+                    excerpt="FAIL package [build failed]",
+                )
+            )
+            content = todo.read_text(encoding="utf-8")
+
+        self.assertEqual(content.count("## Evidence"), 1)
+        self.assertIn("FAIL package [build failed]", content)
+        self.assertIn("make test-noisy exited 2", result["summary"])
+        self.assertIn("## Decision Log", content)
+
+    def test_valid_nested_gate_decision_advances_and_preserves_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            todo = Path(directory) / "layer.todo.md"
+            original = todo_text()
+            todo.write_text(original, encoding="utf-8")
+            result = red_gate.record_decision(
+                argparse.Namespace(
+                    artifact=str(todo),
+                    selection="confirm_red",
+                    feedback="expected failure",
+                    command="go test ./...",
+                    exit_code=1,
+                    evidence_path="/tmp/full.log",
+                )
+            )
+            content = todo.read_text(encoding="utf-8")
+
+        self.assertTrue(result["proceed"])
+        self.assertIn("status: ready-for-implementation", content)
+        self.assertIn("red_gate_state: observed-red", content)
+        self.assertIn("expected failure", content)
+        self.assertIn("Given a pending order", content)
+
+    def test_contradictory_decision_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            todo = Path(directory) / "layer.todo.md"
+            todo.write_text(todo_text(), encoding="utf-8")
+            result = red_gate.record_decision(
+                argparse.Namespace(
+                    artifact=str(todo),
+                    selection="confirm_red",
+                    feedback="",
+                    command="go test ./...",
+                    exit_code=0,
+                    evidence_path="/tmp/full.log",
+                )
+            )
+            content = todo.read_text(encoding="utf-8")
+
+        self.assertFalse(result["proceed"])
+        self.assertIn("status: needs-human-test-gate", content)
+        self.assertIn("blocked: selection contradicts exit code", content)
+
+
+class LayerDiffTests(unittest.TestCase):
+    def initialize_repository(self, root: Path) -> Path:
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+        (root / "src").mkdir()
+        (root / "legacy").mkdir()
+        (root / "src" / "order.txt").write_text("base\n", encoding="utf-8")
+        (root / "legacy" / "old.txt").write_text("old\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=root, check=True)
+        todo = root / ".github" / "plans" / "slice" / "L10.todo.md"
+        todo.parent.mkdir(parents=True)
+        todo.write_text(todo_text(), encoding="utf-8")
+        return todo
+
+    def test_second_snapshot_excludes_the_first_layers_change_to_same_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            todo = self.initialize_repository(root)
+            first_snapshot = str(snapshot.capture()["snapshot_tree"])
+            (root / "src" / "order.txt").write_text("base\nlayer one\n", encoding="utf-8")
+            first = layer_diff.create(first_snapshot, todo, 16_384)
+            second_snapshot = str(snapshot.capture()["snapshot_tree"])
+            (root / "src" / "order.txt").write_text("base\nlayer one\nlayer two\n", encoding="utf-8")
+            second = layer_diff.create(second_snapshot, todo, 16_384)
+            Path(str(first["patch_path"])).unlink(missing_ok=True)
+            Path(str(second["patch_path"])).unlink(missing_ok=True)
+
+        self.assertIn("+layer one", first["bounded_patch"])
+        self.assertNotIn("+layer one", second["bounded_patch"])
+        self.assertIn("+layer two", second["bounded_patch"])
+        self.assertEqual(second["boundary_status"], "passed")
+
+    def test_forbidden_path_is_a_deterministic_violation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            todo = self.initialize_repository(root)
+            before = str(snapshot.capture()["snapshot_tree"])
+            (root / "legacy" / "old.txt").write_text("changed\n", encoding="utf-8")
+            result = layer_diff.create(before, todo, 512)
+            Path(str(result["patch_path"])).unlink(missing_ok=True)
+
+        self.assertEqual(result["boundary_status"], "violated")
+        self.assertEqual(result["boundary_violations"], ["legacy/old.txt"])
+
+    def test_active_todo_update_is_not_a_production_boundary_violation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            todo = self.initialize_repository(root)
+            before = str(snapshot.capture()["snapshot_tree"])
+            todo.write_text(todo_text() + "\nImplementation progress.\n", encoding="utf-8")
+            result = layer_diff.create(before, todo, 512)
+            Path(str(result["patch_path"])).unlink(missing_ok=True)
+
+        self.assertEqual(result["boundary_status"], "passed")
+        self.assertEqual(result["boundary_violations"], [])
+        self.assertEqual(
+            result["boundary_exempt_paths"],
+            [".github/plans/slice/L10.todo.md"],
+        )
+
+    def test_multi_column_runtime_boundary_keeps_forbidden_paths_forbidden(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            todo = Path(directory) / "L10.todo.md"
+            todo.write_text(
+                """## Implementation Boundary
+
+| Allowed Areas | Forbidden Areas | Top-Level Behavior Limits | Read-Only Tests |
+| --- | --- | --- | --- |
+| `internal/orders/order.go`; `internal/orders/*_test.go` | `.benchmark/`, `internal/legacy/`, `internal/httpapi/` | Add `StatusCancelled` and `Order.Cancel()` only. | `internal/orders/service_test.go` |
+
+## Task Board
+""",
+                encoding="utf-8",
+            )
+            allowed, forbidden = layer_diff.boundary_paths(todo)
+
+        self.assertEqual(
+            allowed,
+            ["internal/orders/*_test.go", "internal/orders/order.go"],
+        )
+        self.assertEqual(
+            forbidden,
+            [".benchmark", "internal/httpapi", "internal/legacy"],
+        )
+        classification = layer_diff.classify(
+            ["internal/orders/order.go", "internal/legacy/cancel.go"],
+            allowed,
+            forbidden,
+        )
+        self.assertEqual(classification["boundary_status"], "violated")
+        self.assertEqual(
+            classification["boundary_violations"], ["internal/legacy/cancel.go"]
+        )
+
+
+class LayerContextTests(unittest.TestCase):
+    def create_project(self, root: Path) -> tuple[Path, Path]:
+        plan = root / ".github" / "plans" / "slice"
+        todo = plan / "layers" / "L10-domain.md"
+        todo.parent.mkdir(parents=True)
+        layer_map = plan / "01-layer-map.md"
+        layer_map.write_text(
+            """---
+selected_layer: L10-domain
+---
+
+# Layer map
+
+L10 owns order cancellation.
+""",
+            encoding="utf-8",
+        )
+        todo.write_text(
+            """---
+selected_layer: L10-domain
+---
+
+# L10 Domain
+
+## Behavior Contract
+
+Given a pending order, when it is cancelled, then its state is cancelled.
+
+## Implementation Boundary
+
+| Allowed Areas | Forbidden Areas | Top-Level Behavior Limits | Read-Only Tests |
+| --- | --- | --- | --- |
+| `internal/orders/order.go`; `internal/orders/*_test.go` | `internal/legacy/` | Add cancellation only. | `internal/orders/service_test.go` |
+
+## Task Board
+""",
+            encoding="utf-8",
+        )
+        orders = root / "internal" / "orders"
+        orders.mkdir(parents=True)
+        (orders / "order.go").write_text("package orders\n\ntype Order struct{}\n", encoding="utf-8")
+        (orders / "order_test.go").write_text("package orders\n", encoding="utf-8")
+        (orders / "service_test.go").write_text("package orders\n// read only\n", encoding="utf-8")
+        legacy = root / "internal" / "legacy"
+        legacy.mkdir(parents=True)
+        (legacy / "secret.go").write_text("package legacy\n// MUST NOT LEAK\n", encoding="utf-8")
+        return layer_map, todo
+
+    def test_projection_is_bounded_and_excludes_forbidden_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            layer_map, _ = self.create_project(root)
+            request = "Add func (o Order) Cancel() (updated Order, changed bool, err error)."
+            result = layer_context.build("todo-generator", layer_map, None, request)
+            manifest = Path(str(result["manifest_path"]))
+            manifest_content = manifest.read_text(encoding="utf-8")
+
+        self.assertEqual(result["selected_layer"], "L10-domain")
+        self.assertEqual(result["allowed_paths"], ["internal/orders/*_test.go", "internal/orders/order.go"])
+        self.assertEqual(result["forbidden_paths"], ["internal/legacy"])
+        self.assertEqual(result["read_only_paths"], ["internal/orders/service_test.go"])
+        self.assertIn("internal/orders/order.go", result["production_files"])
+        self.assertIn("internal/orders/order_test.go", result["test_files"])
+        self.assertIn("internal/orders/service_test.go", result["test_files"])
+        self.assertLessEqual(result["source_context_bytes"], layer_context.CONSUMER_BUDGETS["todo-generator"])
+        self.assertNotIn("MUST NOT LEAK", result["source_context"])
+        self.assertEqual(result["request_contract"], request)
+        self.assertIn('"sha256"', manifest_content)
+
+    def test_projection_refreshes_after_an_allowed_source_change(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            _, todo = self.create_project(root)
+            first = layer_context.build("implementor", None, todo)
+            (root / "internal" / "orders" / "order.go").write_text(
+                "package orders\n\ntype Order struct{ Cancelled bool }\n",
+                encoding="utf-8",
+            )
+            second = layer_context.build("implementor", None, todo)
+
+        self.assertNotEqual(first["source_fingerprint"], second["source_fingerprint"])
+        first_hash = next(item["sha256"] for item in first["source_files"] if item["path"] == "internal/orders/order.go")
+        second_hash = next(item["sha256"] for item in second["source_files"] if item["path"] == "internal/orders/order.go")
+        self.assertNotEqual(first_hash, second_hash)
+
+
+class WorkflowWiringTests(unittest.TestCase):
+    def test_reviewer_has_no_raw_verification_stream_references(self) -> None:
+        prompt = REVIEWER.read_text(encoding="utf-8")
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        for stream in ("stdout", "stderr"):
+            self.assertNotIn(f"verification_tests.output.{stream}", prompt)
+            self.assertNotIn(f"verification_lint.output.{stream}", prompt)
+            self.assertNotIn(f"verification_security.output.{stream}", prompt)
+            self.assertNotIn(f"verification_tests.output.{stream}", workflow)
+            self.assertNotIn(f"verification_lint.output.{stream}", workflow)
+            self.assertNotIn(f"verification_security.output.{stream}", workflow)
+
+    def test_gate_feedback_uses_runtime_shaped_additional_input(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("red_suite_evidence_gate.output.additional_input.feedback?", workflow)
+        self.assertNotIn("red_suite_evidence_gate.output.feedback?", workflow)
+
+    def test_mechanical_recorders_are_scripts_not_models(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        for name in ("red_suite_evidence_recorder", "red_gate_decision_recorder"):
+            block = workflow.split(f"  - name: {name}\n", 1)[1].split("\n  - name:", 1)[0]
+            self.assertIn("type: script", block)
+            self.assertNotIn("model:", block)
+            self.assertNotIn("prompt:", block)
+
+    def test_expensive_layer_agents_receive_bounded_context_projections(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        expected = {
+            "selected_layer_context": "todo-generator",
+            "test_author_context": "test-author",
+            "implementation_context": "implementor",
+        }
+        for name, consumer in expected.items():
+            block = workflow.split(f"  - name: {name}\n", 1)[1].split("\n  - name:", 1)[0]
+            self.assertIn("type: script", block)
+            self.assertIn("build-layer-context.py", block)
+            self.assertIn(f"- {consumer}", block)
+
+        self.assertIn("route: test_author_context", workflow)
+        self.assertNotIn("route: agent_test_author", workflow)
+        self.assertIn("route: implementation_context", workflow)
+        self.assertNotIn("route: implementor", workflow)
+
+    def test_projection_prompts_forbid_broad_discovery_and_full_suite_replays(self) -> None:
+        todo_prompt = TODO_GENERATOR.read_text(encoding="utf-8")
+        test_prompt = TEST_AUTHOR.read_text(encoding="utf-8")
+        implementor_prompt = IMPLEMENTOR.read_text(encoding="utf-8")
+
+        for prompt in (todo_prompt, test_prompt, implementor_prompt):
+            self.assertIn("source_context", prompt)
+            self.assertIn("request_contract", prompt)
+            self.assertIn("Do not scan or search the repository broadly", prompt)
+        self.assertIn("Do not run tests, lint, or security commands", todo_prompt)
+        self.assertIn("Do not run a targeted test command", test_prompt)
+        self.assertIn("Do not rerun the full suite", implementor_prompt)
+
+
+if __name__ == "__main__":
+    unittest.main()
