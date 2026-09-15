@@ -8,6 +8,16 @@ This is a revision pass, not a fresh layer-selection or todo-generation run.
 Read the active todo and all human or checkpoint feedback before revising it in
 place.
 
+Available feedback (blank entries did not occur on the active route):
+
+- layer todo gate: {{ layer_todo_gate.output.additional_input.feedback | default("") }}
+- layer todo revision gate: {{ layer_todo_revision_gate.output.additional_input.feedback | default("") }}
+- red-suite evidence gate: {{ red_suite_evidence_gate.output.additional_input.feedback | default("") }}
+- test-author checkpoint: {{ agent_test_checkpoint_gate.output.additional_input.feedback | default("") }}
+- implementation checkpoint: {{ checkpoint_gate.output.additional_input.feedback | default("") }}
+- deterministic test-author preparation: {{ test_author_preparation_gate.output.additional_input.feedback | default("") }}
+- deterministic test-author result check: {{ test_author_result_gate.output.additional_input.feedback | default("") }}
+
 Persist the immediately preceding Conductor gate decision and any non-empty gate
 comment in `## Decision Log`; update frontmatter only when that decision changes
 durable state.

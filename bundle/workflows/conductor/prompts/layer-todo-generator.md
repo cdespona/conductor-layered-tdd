@@ -101,7 +101,11 @@ Artifact style:
   - `## Red-Test Gate` table with state, evidence command, observed result, waiver/approval reason, and whether production implementation may proceed
   - `## Behavior Contract` with concise Gherkin or equivalent examples
   - `## Implementation Boundary` table with allowed areas, forbidden areas, top-level behavior limits, and read-only tests
-  - `## Task Board` checklist table with task, type, owner, status, and notes
+  - `## Task Board` checklist table with task, type, owner, status, and notes.
+    Use the exact type `top-level-test` for every human-approved top-level test
+    row; reserve other type values for production, internal tests, boundary, or
+    review work. This stable type lets deterministic scripts update only the
+    approved test rows.
   - `## Risk Board` table with risk, trigger, mitigation, and checkpoint condition
   - `## Decision Log` table with decision, comment, command/evidence, and timestamp columns
 - If `red_gate_state` is `blocked`, make the blocked reason visible in the `Red-Test Gate` table.

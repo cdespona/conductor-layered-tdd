@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 
 CONSUMER_BUDGETS = {
     "todo-generator": 12_000,
-    "test-author": 16_000,
+    "test-author": 10_000,
     "implementor": 20_000,
     "cleanup-planner": 16_000,
     "cleanup-implementor": 20_000,
@@ -51,6 +51,22 @@ def frontmatter_value(content: str, key: str) -> str:
         if match.group("key") == key:
             return match.group("value").strip().strip('"\'')
     return ""
+
+
+def section_projection(content: str, headings: list[str]) -> str:
+    """Project only contract sections needed by a narrow consumer."""
+    projected: list[str] = []
+    if content.startswith("---"):
+        end = content.find("\n---", 3)
+        if end >= 0:
+            projected.append(content[: end + 4].strip())
+    for heading in headings:
+        match = re.search(
+            rf"(?ms)^## {re.escape(heading)}\s*\n.*?(?=^##\s|\Z)", content
+        )
+        if match:
+            projected.append(match.group(0).strip())
+    return "\n\n".join(projected)
 
 
 def selected_todo(layer_map: Path, selected_layer: str) -> Path:
@@ -276,10 +292,25 @@ def build(
         root, source_files, CONSUMER_BUDGETS[consumer]
     )
     map_excerpt, map_truncated = utf8_prefix(map_content, 8_000)
-    contract_excerpt, contract_truncated = utf8_prefix(todo_content, 14_000)
+    contract_source = (
+        section_projection(
+            todo_content,
+            ["Red-Test Gate", "Behavior Contract", "Implementation Boundary", "Task Board"],
+        )
+        if consumer == "test-author"
+        else todo_content
+    )
+    contract_excerpt, contract_truncated = utf8_prefix(
+        contract_source, 10_000 if consumer == "test-author" else 14_000
+    )
     request_excerpt, request_truncated = utf8_prefix(request, 12_000)
     relative_map = layer_map.resolve().relative_to(root).as_posix()
     relative_todo = todo.resolve().relative_to(root).as_posix()
+    repository_skill_paths = sorted(
+        path.resolve().relative_to(root).as_posix()
+        for path in (root / ".github" / "skills").glob("conductor-*/SKILL.md")
+        if path.is_file()
+    )[:20]
     manifest_path = todo.parent.parent / ".context" / f"{selected_layer}-{consumer}.json"
     manifest = {
         "schema_version": 1,
@@ -292,6 +323,7 @@ def build(
         "read_only_paths": read_only,
         "production_files": production_files,
         "test_files": test_files,
+        "repository_skill_paths": repository_skill_paths,
         "source_files": sources,
         "source_context": source_context,
         "source_context_bytes": len(source_context.encode("utf-8")),

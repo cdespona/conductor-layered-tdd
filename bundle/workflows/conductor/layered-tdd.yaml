@@ -23,7 +23,7 @@ workflow:
     mode: explicit
   instructions:
     - "This workflow is self-contained. Use the installed workflow prompts and any repo-local Conductor skills under `.github/skills/conductor-*/`; do not require LTDD documentation files to exist in the target repository."
-    - "Before code-changing agent work, check whether a relevant `.github/skills/conductor-<skill>/SKILL.md` exists and follow it when applicable."
+    - "Before code-changing agent work, check whether a relevant `.github/skills/conductor-<skill>/SKILL.md` exists and follow it when applicable. A bounded context field that explicitly lists matching skill paths satisfies the existence check; do not search again when that list is present."
     - "If the Copilot CLI caveman skill is available, use caveman for planning notes, checkpoints, summaries, and human gate text. Keep artifact schemas, commands, paths, errors, and verification results exact and readable."
     - "When graphify-out/graph.json exists, use Graphify only for bounded repository-navigation questions before opening returned source locations. Do not rebuild or update the graph from an agent prompt."
   limits:
@@ -1245,6 +1245,13 @@ agents:
       effort: high
     input:
       - layer_todo_generator.output.artifact_path
+      - layer_todo_gate.output.additional_input.feedback?
+      - layer_todo_revision_gate.output?
+      - red_suite_evidence_gate.output.additional_input.feedback?
+      - agent_test_checkpoint_gate.output.additional_input.feedback?
+      - checkpoint_gate.output.additional_input.feedback?
+      - test_author_preparation_gate.output.additional_input.feedback?
+      - test_author_result_gate.output.additional_input.feedback?
     prompt: !file prompts/layer-todo-reviser.md
     output:
       artifact_path:
@@ -1285,7 +1292,7 @@ agents:
       - label: Gherkin is approved; have the agent author the top-level test.
         value: author_agent_test
         prompt_for: feedback
-        route: test_author_context
+        route: test_author_preparer
       - label: Gherkin is approved; verify the existing top-level test with the full suite.
         value: verify_existing_test
         prompt_for: feedback
@@ -1317,7 +1324,7 @@ agents:
       - label: Gherkin is approved; have the agent author the top-level test.
         value: author_agent_test
         prompt_for: feedback
-        route: test_author_context
+        route: test_author_preparer
       - label: Gherkin is approved; verify the existing top-level test with the full suite.
         value: verify_existing_test
         prompt_for: feedback
@@ -1333,9 +1340,30 @@ agents:
         value: stop
         route: stopped
 
+  - name: test_author_preparer
+    type: script
+    description: Record the approved handoff and mark only top-level test tasks in progress.
+    input:
+      - layer_todo_generator.output.artifact_path
+      - layer_todo_gate.output.additional_input.feedback?
+      - layer_todo_revision_gate.output?
+    command: python3
+    args:
+      - workflows/conductor/scripts/record-test-author.py
+      - prepare
+      - --artifact
+      - "{{ layer_todo_generator.output.artifact_path }}"
+      - --feedback
+      - >-
+        {% if layer_todo_revision_gate is defined and layer_todo_revision_gate.output is defined %}{{ layer_todo_revision_gate.output.additional_input.feedback | default("") }}{% else %}{{ layer_todo_gate.output.additional_input.feedback | default("") }}{% endif %}
+    routes:
+      - to: test_author_context
+        when: "{{ output.proceed }}"
+      - to: test_author_preparation_gate
+
   - name: test_author_context
     type: script
-    description: Refresh the bounded context projection for the approved test author.
+    description: Build a narrow context projection after the approved handoff is recorded.
     input:
       - layer_todo_generator.output.artifact_path
       - workflow.input.request
@@ -1348,6 +1376,35 @@ agents:
       - "{{ layer_todo_generator.output.artifact_path }}"
       - --request
       - "{{ workflow.input.request }}"
+    routes:
+      - to: test_author_snapshot
+
+  - name: test_author_preparation_gate
+    type: human_gate
+    prompt: |
+      The deterministic test-author handoff could not identify an unambiguous
+      top-level-test Task Board row. Revise the same todo before model work.
+
+      Todo: `{{ test_author_preparer.output.artifact_path }}`
+      Errors: {{ test_author_preparer.output.errors }}
+    options:
+      - label: Revise the current layer todo.
+        value: revise_layer_todo
+        prompt_for: feedback
+        route: layer_todo_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: test_author_snapshot
+    type: script
+    description: Capture the exact tree after deterministic handoff state and before test authoring.
+    command: python3
+    args:
+      - workflows/conductor/scripts/capture-layer-snapshot.py
     routes:
       - to: agent_test_author
 
@@ -1364,6 +1421,7 @@ agents:
       - test_author_context.output.read_only_paths
       - test_author_context.output.production_files
       - test_author_context.output.test_files
+      - test_author_context.output.repository_skill_paths
       - test_author_context.output.source_context
       - test_author_context.output.source_context_bytes
       - test_author_context.output.source_context_truncated
@@ -1372,7 +1430,7 @@ agents:
       - test_author_context.output.request_contract_truncated
       - test_author_context.output.source_fingerprint
       - graphify_status.output.graph_available?
-      - graphify_refresh.output.graph_available?
+      - graphify_refresh.output?
     reasoning:
       effort: high
     prompt: !file prompts/agent-test-author.md
@@ -1393,9 +1451,59 @@ agents:
         type: string
         description: Test-authoring summary with no production implementation.
     routes:
+      - to: test_author_completion_recorder
+
+  - name: test_author_completion_recorder
+    type: script
+    description: Validate test-only changes and mark only approved test tasks complete.
+    input:
+      - test_author_context.output.todo_path
+      - test_author_context.output.manifest_path
+      - test_author_snapshot.output.snapshot_tree
+      - agent_test_author.output.test_files_modified
+      - agent_test_author.output.checkpoint_required
+    command: python3
+    args:
+      - workflows/conductor/scripts/record-test-author.py
+      - complete
+      - --artifact
+      - "{{ test_author_context.output.todo_path }}"
+      - --manifest
+      - "{{ test_author_context.output.manifest_path }}"
+      - --snapshot-tree
+      - "{{ test_author_snapshot.output.snapshot_tree }}"
+      - --reported-files
+      - "{{ agent_test_author.output.test_files_modified | json }}"
+      - --checkpoint-required
+      - "{{ 'true' if agent_test_author.output.checkpoint_required else 'false' }}"
+    routes:
       - to: agent_test_checkpoint_gate
         when: "{{ output.checkpoint_required }}"
       - to: red_suite_verifier
+        when: "{{ output.proceed }}"
+      - to: test_author_result_gate
+
+  - name: test_author_result_gate
+    type: human_gate
+    prompt: |
+      The test author's changed paths did not match its bounded test-only
+      contract. Production implementation remains blocked.
+
+      Todo: `{{ test_author_completion_recorder.output.artifact_path }}`
+      Changed files: {{ test_author_completion_recorder.output.changed_files }}
+      Violations: {{ test_author_completion_recorder.output.violations }}
+      Errors: {{ test_author_completion_recorder.output.errors }}
+    options:
+      - label: Revise the current layer todo.
+        value: revise_layer_todo
+        prompt_for: feedback
+        route: layer_todo_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Stop this slice.
+        value: stop
+        route: stopped
 
   - name: red_suite_verifier
     type: script

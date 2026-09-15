@@ -60,6 +60,7 @@ flowchart LR
 | `prompts/cleanup-implementor.md` | Removes only the approved private supersession chain. |
 | `prompts/cleanup-reviewer.md` | Reviews cleanup evidence without inventing implementation-coupled absence tests. |
 | `scripts/build-layer-context.py` | Derives bounded, hashed source projections for todo generation, test authoring, and implementation. |
+| `scripts/record-test-author.py` | Records test-author approval/task state and validates that the model changed only reported in-boundary tests. |
 | `scripts/route-selected-layer.py` | Defaults missing `work_kind` to behavior and routes explicit cleanup layers separately. |
 | `scripts/check-cleanup-result.py` | Checks declared removal paths and bounded fixed-string references after cleanup. |
 | `scripts/run-verification.py` | Runs a verification command, stores complete output, and returns bounded evidence. |
@@ -561,8 +562,11 @@ top-level test before any production code is touched.
 ```mermaid
 flowchart LR
     A["Approve Gherkin and agent test ownership"] --> B["Choose: agent authors top-level test"]
-    B --> C["Agent writes test; Conductor runs full suite"]
-    C --> D["Script stores full output and bounded evidence"]
+    B --> Prep["Script records decision + marks test tasks in progress"]
+    Prep --> Context["Narrow test contract + source projection"]
+    Context --> C["Agent writes only the approved test"]
+    C --> Validate["Script validates changed paths + marks tasks done"]
+    Validate --> D["Conductor runs full suite and stores bounded evidence"]
     D --> E["Human chooses red/green evidence decision + comment"]
     E --> F["Script persists state and snapshots the layer boundary"]
     F --> G["Implementation starts"]
@@ -571,10 +575,11 @@ flowchart LR
 | Step | Artifact state / action | Production code allowed? |
 | --- | --- | --- |
 | 1 | Approve Gherkin and select `agent-written-after-approval` in the layer-todo gate. Add any caveat as the optional gate comment. | No |
-| 2 | The choice automatically records agent test ownership and the optional comment, then changes only the approved top-level-test Task Board row(s) to `agent`. Unrelated human tasks remain unchanged. | No |
-| 3 | The agent adds only the approved top-level test and marks only its Task Board row(s) done. | No |
-| 4 | Conductor runs the configured full suite (`test_command`), keeps complete output in an evidence file, and records a bounded summary in `## Evidence`. | No |
-| 5 | At the evidence gate, choose whether the recorded result is expected red or acceptable existing coverage. The decision recorder updates frontmatter and `## Decision Log`. | Yes |
+| 2 | A script records agent test ownership and the optional comment, then marks only exact `Type: top-level-test` Task Board rows in progress. A legacy `Type: test` row is accepted only when exactly one exists. Ambiguity fails closed to human revision. | No |
+| 3 | The agent receives only the red gate, behavior contract, boundary, test task rows, bounded source, and exact original request. It changes only approved tests; it does not edit the todo or inspect Git state. | No |
+| 4 | A script compares the pre-author snapshot with the working tree. Every change must be a reported, in-boundary, non-read-only test path before the script marks the test task rows done. A checkpoint is valid only with no file changes. | No |
+| 5 | Conductor runs the configured full suite (`test_command`), keeps complete output in an evidence file, and records a bounded summary in `## Evidence`. | No |
+| 6 | At the evidence gate, choose whether the recorded result is expected red or acceptable existing coverage. The decision recorder updates frontmatter and `## Decision Log`. | Yes |
 
 Do not set `observed-red` manually. The deterministic full-suite verifier records the result and the decision recorder writes the allowed gate state only after the human approves it.
 

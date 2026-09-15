@@ -616,6 +616,53 @@ also halved its tool calls, but its input reduction was only 8.7%; this is the
 next agent to inspect with zero-model prompt/tool-event analysis before changing
 its prompt or context budget.
 
+#### 2026-09-04 Zero-Model Test-Author Analysis And Optimization
+
+The saved successful rerun event log explains the weak 8.7% improvement. The
+test author made 15 tool calls even though its initial prompt already contained
+the contract and projected sources:
+
+| Tool-call category | Calls | Treatment |
+| --- | ---: | --- |
+| Reopen manifest, todo, layer map, production source; rediscover tests and skills | 6 | Supply explicit skill/Graphify state and forbid normal-path rediscovery. |
+| Git status/diff checks | 3 | Replace with one deterministic pre-author snapshot and completion comparison. |
+| Todo bookkeeping edits | 2 | Move gate/frontmatter/Task Board/Decision Log state to scripts. |
+| Final rereads of test and todo | 2 | Completion script validates exact changed paths and task state. |
+| Create and format approved test | 2 | Keep model-owned; these require code judgment. |
+
+The implemented candidate changes the model boundary:
+
+```mermaid
+flowchart LR
+    Gate["approved Gherkin"] --> Prepare["script: record handoff + task in progress"]
+    Prepare --> Project["narrow contract projection"]
+    Project --> Snapshot["script: capture tree"]
+    Snapshot --> Author["model: write approved test only"]
+    Author --> Complete["script: test-only diff + task done"]
+    Complete --> Red["full-suite red evidence"]
+```
+
+- The test-author contract now includes only frontmatter, Red-Test Gate,
+  Behavior Contract, Implementation Boundary, and Task Board; it excludes Risk
+  Board, Decision Log history, and later review/implementation notes.
+- Replaying the projection function against the exact saved test-author
+  invocation contract reduces that contract field from 6,245 to 3,571 bytes
+  (42.8%). This is deterministic payload evidence, not a token result.
+- Its source budget is reduced from 16 KB to 10 KB.
+- The context manifest lists matching repository Conductor skills, so an empty
+  list satisfies the existence check without another glob. Workflow-provided
+  Graphify status is rendered explicitly for the same reason.
+- The model no longer edits workflow artifacts or performs Git status/diff
+  checks. It should normally need only test creation/editing and formatting.
+- The completion recorder fails closed on production, forbidden, read-only,
+  unreported, or out-of-boundary changes. A model checkpoint is valid only when
+  it changed no files.
+
+This is structural evidence and an implemented candidate, not a token-savings
+claim. The Go suite, 45 Python tests, temporary installation parity, Conductor
+validation, and `git diff --check` passed. No paid diagnostic or benchmark was
+run.
+
 Compared with the earlier successful pre-projection L10 diagnostic, this valid
 rerun used 404,935 fewer whole-run input tokens (31.7% lower) and $0.1956 less
 (14.8% lower). The three projected agents used 322,157 fewer input tokens in

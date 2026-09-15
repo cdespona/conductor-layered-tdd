@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import subprocess
 import tempfile
@@ -39,6 +40,7 @@ layer_diff = load_module("create_layer_diff", SCRIPTS / "create-layer-diff.py")
 layer_context = load_module("build_layer_context", SCRIPTS / "build-layer-context.py")
 layer_router = load_module("route_selected_layer", SCRIPTS / "route-selected-layer.py")
 cleanup_check = load_module("check_cleanup_result", SCRIPTS / "check-cleanup-result.py")
+test_author_recorder = load_module("record_test_author", SCRIPTS / "record-test-author.py")
 
 
 @contextmanager
@@ -379,6 +381,146 @@ Given a pending order, when it is cancelled, then its state is cancelled.
         second_hash = next(item["sha256"] for item in second["source_files"] if item["path"] == "internal/orders/order.go")
         self.assertNotEqual(first_hash, second_hash)
 
+    def test_test_author_contract_projection_omits_review_and_risk_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            _, todo = self.create_project(root)
+            todo.write_text(
+                todo.read_text(encoding="utf-8")
+                + "\n## Risk Board\n\nDO NOT REPLAY RISK HISTORY\n"
+                + "\n## Decision Log\n\nDO NOT REPLAY DECISION HISTORY\n",
+                encoding="utf-8",
+            )
+            result = layer_context.build("test-author", None, todo, "Exact API contract")
+
+        self.assertIn("## Behavior Contract", result["layer_contract"])
+        self.assertIn("## Implementation Boundary", result["layer_contract"])
+        self.assertIn("## Task Board", result["layer_contract"])
+        self.assertNotIn("DO NOT REPLAY RISK HISTORY", result["layer_contract"])
+        self.assertNotIn("DO NOT REPLAY DECISION HISTORY", result["layer_contract"])
+        self.assertLessEqual(result["source_context_bytes"], 10_000)
+
+
+class TestAuthorRecorderTests(unittest.TestCase):
+    def todo(self, root: Path) -> Path:
+        todo = root / ".github" / "plans" / "slice" / "layers" / "L10.todo.md"
+        todo.parent.mkdir(parents=True)
+        todo.write_text(
+            """---
+status: ready-for-implementation
+owner: human
+workflow: layered-tdd
+selected_layer: L10
+test_ownership: human-written
+red_gate_state: not-run-human-approved
+---
+
+## Task Board
+
+| Task | Type | Owner | Status | Notes |
+| --- | --- | --- | --- | --- |
+| - [ ] Add contract test. | top-level-test | human | pending | approved Gherkin |
+| - [ ] Implement behavior. | production | implementor | pending | later |
+
+## Decision Log
+
+| Decision | Comment | Command/evidence | Timestamp |
+| --- | --- | --- | --- |
+""",
+            encoding="utf-8",
+        )
+        return todo
+
+    def initialize_repository(self, root: Path) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+        source = root / "internal" / "orders"
+        source.mkdir(parents=True)
+        (source / "order.go").write_text("package orders\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=root, check=True)
+
+    def test_prepare_records_gate_and_only_updates_top_level_test_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            todo = self.todo(Path(directory))
+            result = test_author_recorder.prepare(todo, "cover the exact signature")
+            content = todo.read_text(encoding="utf-8")
+
+        self.assertTrue(result["proceed"])
+        self.assertIn("test_ownership: agent-written-after-approval", content)
+        self.assertIn("red_gate_state: blocked", content)
+        self.assertIn("| - [ ] Add contract test. | top-level-test | agent | in-progress |", content)
+        self.assertIn("| - [ ] Implement behavior. | production | implementor | pending |", content)
+        self.assertIn("cover the exact signature", content)
+
+    def test_complete_accepts_only_reported_in_boundary_test_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            self.initialize_repository(root)
+            todo = self.todo(root)
+            test_author_recorder.prepare(todo, "")
+            manifest = todo.parent.parent / ".context" / "L10-test-author.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(json.dumps({
+                "allowed_paths": ["internal/orders/*_test.go"],
+                "forbidden_paths": ["internal/legacy/**"],
+                "read_only_paths": ["internal/orders/service_test.go"],
+            }), encoding="utf-8")
+            before = str(snapshot.capture()["snapshot_tree"])
+            test_file = root / "internal" / "orders" / "order_test.go"
+            test_file.write_text("package orders\n", encoding="utf-8")
+            result = test_author_recorder.complete(
+                todo, manifest, before, json.dumps(["internal/orders/order_test.go"])
+            )
+            content = todo.read_text(encoding="utf-8")
+
+        self.assertTrue(result["proceed"])
+        self.assertEqual(result["changed_files"], ["internal/orders/order_test.go"])
+        self.assertIn("| - [x] Add contract test. | top-level-test | agent | done |", content)
+
+    def test_complete_rejects_production_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            self.initialize_repository(root)
+            todo = self.todo(root)
+            test_author_recorder.prepare(todo, "")
+            manifest = todo.parent.parent / ".context" / "L10-test-author.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(json.dumps({
+                "allowed_paths": ["internal/orders/order.go", "internal/orders/*_test.go"],
+                "forbidden_paths": [], "read_only_paths": [],
+            }), encoding="utf-8")
+            before = str(snapshot.capture()["snapshot_tree"])
+            (root / "internal" / "orders" / "order.go").write_text("package orders\nvar changed = true\n", encoding="utf-8")
+            result = test_author_recorder.complete(
+                todo, manifest, before, json.dumps(["internal/orders/order.go"])
+            )
+
+        self.assertFalse(result["proceed"])
+        self.assertEqual(result["violations"], ["internal/orders/order.go"])
+
+    def test_checkpoint_is_safe_only_when_author_changed_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            self.initialize_repository(root)
+            todo = self.todo(root)
+            test_author_recorder.prepare(todo, "")
+            manifest = todo.parent.parent / ".context" / "L10-test-author.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(json.dumps({
+                "allowed_paths": ["internal/orders/*_test.go"],
+                "forbidden_paths": [], "read_only_paths": [],
+            }), encoding="utf-8")
+            before = str(snapshot.capture()["snapshot_tree"])
+            result = test_author_recorder.complete(
+                todo, manifest, before, "[]", checkpoint_required=True
+            )
+
+        self.assertTrue(result["checkpoint_required"])
+        self.assertFalse(result["proceed"])
+        self.assertEqual(result["changed_files"], [])
+
 
 class LayerWorkKindRoutingTests(unittest.TestCase):
     def create_layer(self, root: Path, work_kind: str | None) -> Path:
@@ -520,7 +662,10 @@ class WorkflowWiringTests(unittest.TestCase):
 
     def test_mechanical_recorders_are_scripts_not_models(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        for name in ("red_suite_evidence_recorder", "red_gate_decision_recorder"):
+        for name in (
+            "red_suite_evidence_recorder", "red_gate_decision_recorder",
+            "test_author_preparer", "test_author_completion_recorder",
+        ):
             block = workflow.split(f"  - name: {name}\n", 1)[1].split("\n  - name:", 1)[0]
             self.assertIn("type: script", block)
             self.assertNotIn("model:", block)
@@ -539,7 +684,8 @@ class WorkflowWiringTests(unittest.TestCase):
             self.assertIn("build-layer-context.py", block)
             self.assertIn(f"- {consumer}", block)
 
-        self.assertIn("route: test_author_context", workflow)
+        self.assertIn("route: test_author_preparer", workflow)
+        self.assertIn("to: test_author_context", workflow)
         self.assertNotIn("route: agent_test_author", workflow)
         self.assertIn("route: implementation_context", workflow)
         self.assertNotIn("route: implementor", workflow)
@@ -556,6 +702,16 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("Do not run tests, lint, or security commands", todo_prompt)
         self.assertIn("Do not run a targeted test command", test_prompt)
         self.assertIn("Do not rerun the full suite", implementor_prompt)
+
+    def test_test_author_model_only_owns_test_code(self) -> None:
+        prompt = TEST_AUTHOR.read_text(encoding="utf-8")
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        author = workflow.split("  - name: agent_test_author\n", 1)[1].split("\n  - name:", 1)[0]
+        self.assertIn("Do not edit the todo", prompt)
+        self.assertIn("do not reopen the manifest, todo, layer map", prompt)
+        self.assertIn("to: test_author_completion_recorder", author)
+        self.assertNotIn("to: red_suite_verifier", author)
+        self.assertIn("test_author_completion_recorder.output", workflow)
 
     def test_cleanup_route_skips_behavior_test_author_and_red_gate(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
