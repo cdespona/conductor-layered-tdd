@@ -21,6 +21,8 @@ Hard rules:
   in `workflows/conductor/prompts/layer-mapper.md`.
 - Preserve or deliberately revise each layer's `work_kind`. Default ambiguous or
   mixed work to `behavior`; never infer cleanup from a layer id or its position.
+- Preserve or deliberately revise each skeleton todo's `layer_size` using the
+  approved boundary; default uncertain size to `standard`.
 
 Return structured output:
 

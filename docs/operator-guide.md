@@ -249,7 +249,7 @@ Prose should explain only what tables cannot: rationale, caveats, exact evidence
 | Slice selection | `slice-selection.md` | Exactly one slice is selected. | The split is wrong or too large. | You only wanted discovery. |
 | Requirements | `00-requirements.md` | One slice goal is clear and blockers are resolved or accepted. | You edited requirements or answered blockers in the file. | The slice is not worth doing. |
 | Layer selection | `01-layer-map.md` | One next layer is selected. | Boundaries, order, or skeleton todos are wrong. | You do not want to continue this slice. |
-| Layer todo | `layers/<nn>-<layer>.todo.md` | Gherkin, test ownership, and red-test gate are acceptable. | The contract, test mode, or red-test state is wrong. | The layer should not proceed. |
+| Layer todo | `layers/<nn>-<layer>.todo.md` | Gherkin, test ownership, `layer_size`, and red-test gate are acceptable. | The contract, size, test mode, or red-test state is wrong. | The layer should not proceed. |
 | Cleanup plan | Cleanup todo with `work_kind: cleanup` | Replacement is active, consumers migrated, preservation tests exist, and exact removal/reference checks are bounded. | Any consumer, observable change, target, or safety evidence is unclear. | Cleanup should not proceed. |
 | Cleanup baseline | Bounded test/lint/security evidence | All three checks are green immediately before removal. | Revise if the cleanup contract caused the mismatch. | Existing failures cannot be resolved safely. |
 | Checkpoint | Active layer todo | The checkpoint is not actually new top-level behavior, or you chose a route. | Route to layer todo or layer selection if scope changed. | The contradiction blocks the slice. |
@@ -272,6 +272,18 @@ flowchart LR
 ```
 
 ## Frontmatter Rules
+
+### Layer size and model
+
+| Approved `layer_size` | Use when | Test author / implementor |
+| --- | --- | --- |
+| `small` | Documentation-only or one localized behavior with clear acceptance criteria and known tests. | GPT-6 Luna, high reasoning. |
+| `standard` or missing | The layer needs broader code judgment or its size is uncertain. | Claude Sonnet 5.5, medium reasoning. |
+
+The layer mapper proposes size in each skeleton todo; review it before test
+authoring or implementation. Split work that crosses multiple architectural
+boundaries rather than labeling an oversized layer `standard`. Invalid size
+values stop context preparation.
 
 ### Layer work kind
 

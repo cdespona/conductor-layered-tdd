@@ -66,6 +66,8 @@ Tasks:
 
 1. Confirm the active map frontmatter agrees with the projected selected layer.
 2. Revise only the selected todo under that active map's `layers/` directory.
+   Preserve its approved `layer_size` frontmatter. If absent in an older map,
+   set `layer_size: standard`; do not infer a cheaper route after approval.
 3. Include top-level Gherkin proposals and the full-suite command
    `{{ workflow.input.test_command }}` as the red-test evidence command.
 4. Set one layer-level test ownership mode:

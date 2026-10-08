@@ -37,7 +37,7 @@ missing, set `ready_for_cleanup: false` and require a separate behavior/test-har
 layer before cleanup. Split mixed or ambiguous work; do not silently
 route observable behavior changes through cleanup.
 
-Use frontmatter with `work_kind: cleanup`, `selected_layer`, `status`, `owner`,
+Use frontmatter with `work_kind: cleanup`, the approved `layer_size`, `selected_layer`, `status`, `owner`,
 and `workflow: layered-tdd`. Use `status: needs-human-cleanup-approval` and
 `owner: human` when ready; otherwise use `status: blocked`.
 

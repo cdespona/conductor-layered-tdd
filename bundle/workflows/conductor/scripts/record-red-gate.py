@@ -71,6 +71,18 @@ def append_decision(content: str, row: str) -> str:
     return content[: match.start()] + replacement + content[match.end() :]
 
 
+def update_red_gate_row(content: str, row: str) -> str:
+    section = re.search(r"(?ms)^## Red-Test Gate\s*\n(?P<body>.*?)(?=^##\s|\Z)", content)
+    if not section:
+        return content
+    body = section.group("body")
+    rows = list(re.finditer(r"(?m)^\|.*\|[ \t]*$", body))
+    if len(rows) != 3 or "| State |" not in rows[0].group():
+        fail("Red-Test Gate must contain one state row")
+    data = rows[2]
+    return content[: section.start("body") + data.start()] + row + content[section.start("body") + data.end() :]
+
+
 def atomic_write(path: Path, content: str) -> None:
     mode = path.stat().st_mode
     with tempfile.NamedTemporaryFile(
@@ -118,6 +130,10 @@ def record_evidence(args: argparse.Namespace) -> dict[str, object]:
         ]
     )
     content = upsert_section(content, "## Evidence", body)
+    content = update_red_gate_row(
+        content,
+        f"| `blocked` | `{markdown_cell(args.command)}` | Exit {args.exit_code} ({observed}); see Evidence. | Awaiting human red-gate decision. | No |",
+    )
     atomic_write(path, content)
     summary = (
         f"{args.command} exited {args.exit_code} ({observed}); "
@@ -151,6 +167,10 @@ def record_decision(args: argparse.Namespace) -> dict[str, object]:
         result = "blocked: selection contradicts exit code"
 
     evidence = f"{args.command} (exit {args.exit_code}); {args.evidence_path}; {result}"
+    content = update_red_gate_row(
+        content,
+        f"| `{red_state}` | `{markdown_cell(args.command)}` | Exit {args.exit_code}; see Evidence. | {markdown_cell(args.feedback) or result} | {'Yes' if valid else 'No'} |",
+    )
     row = "| {} | {} | {} | {} |".format(
         markdown_cell(args.selection),
         markdown_cell(args.feedback),

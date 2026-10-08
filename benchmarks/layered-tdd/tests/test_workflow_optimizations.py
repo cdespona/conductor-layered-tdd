@@ -84,6 +84,17 @@ Pending.
 """
 
 
+def red_gate_todo_text() -> str:
+    return todo_text().replace(
+        "## Behavior Contract\n",
+        "## Red-Test Gate\n\n"
+        "| State | Evidence command | Observed result | Waiver/approval reason | Production implementation may proceed |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| `blocked` | `go test ./...` | Not run. | Awaiting approval. | No |\n\n"
+        "## Behavior Contract\n",
+    )
+
+
 class VerificationEvidenceTests(unittest.TestCase):
     def test_retains_full_output_but_bounds_the_summary_by_bytes(self) -> None:
         result = verification.run(
@@ -111,7 +122,7 @@ class RedGateRecorderTests(unittest.TestCase):
     def test_records_evidence_without_granting_implementation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             todo = Path(directory) / "layer.todo.md"
-            todo.write_text(todo_text(), encoding="utf-8")
+            todo.write_text(red_gate_todo_text(), encoding="utf-8")
             result = red_gate.record_evidence(
                 argparse.Namespace(
                     artifact=str(todo),
@@ -127,6 +138,7 @@ class RedGateRecorderTests(unittest.TestCase):
         self.assertIn("status: needs-human-test-gate", content)
         self.assertIn("owner: human", content)
         self.assertIn("red_gate_state: blocked", content)
+        self.assertIn("Exit 1 (non-zero); see Evidence.", content)
         self.assertIn("FAIL TestCancel", content)
         self.assertIn("9000", content)
         self.assertEqual(result["artifact_path"], str(todo))
@@ -158,7 +170,7 @@ class RedGateRecorderTests(unittest.TestCase):
     def test_valid_nested_gate_decision_advances_and_preserves_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             todo = Path(directory) / "layer.todo.md"
-            original = todo_text()
+            original = red_gate_todo_text()
             todo.write_text(original, encoding="utf-8")
             result = red_gate.record_decision(
                 argparse.Namespace(
@@ -175,13 +187,14 @@ class RedGateRecorderTests(unittest.TestCase):
         self.assertTrue(result["proceed"])
         self.assertIn("status: ready-for-implementation", content)
         self.assertIn("red_gate_state: observed-red", content)
+        self.assertIn("| `observed-red` | `go test ./...` | Exit 1; see Evidence. | expected failure | Yes |", content)
         self.assertIn("expected failure", content)
         self.assertIn("Given a pending order", content)
 
     def test_contradictory_decision_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             todo = Path(directory) / "layer.todo.md"
-            todo.write_text(todo_text(), encoding="utf-8")
+            todo.write_text(red_gate_todo_text(), encoding="utf-8")
             result = red_gate.record_decision(
                 argparse.Namespace(
                     artifact=str(todo),
@@ -196,6 +209,7 @@ class RedGateRecorderTests(unittest.TestCase):
 
         self.assertFalse(result["proceed"])
         self.assertIn("status: needs-human-test-gate", content)
+        self.assertIn("| `blocked` | `go test ./...` | Exit 0; see Evidence. | blocked: selection contradicts exit code | No |", content)
         self.assertIn("blocked: selection contradicts exit code", content)
 
 
@@ -384,6 +398,17 @@ Given a pending order, when it is cancelled, then its state is cancelled.
         first_hash = next(item["sha256"] for item in first["source_files"] if item["path"] == "internal/orders/order.go")
         second_hash = next(item["sha256"] for item in second["source_files"] if item["path"] == "internal/orders/order.go")
         self.assertNotEqual(first_hash, second_hash)
+
+    def test_layer_size_is_approved_input_and_invalid_values_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            _, todo = self.create_project(Path(directory))
+            self.assertEqual(layer_context.build("implementor", None, todo)["layer_size"], "standard")
+            original = todo.read_text(encoding="utf-8")
+            todo.write_text(original.replace("selected_layer: L10-domain", "selected_layer: L10-domain\nlayer_size: small"), encoding="utf-8")
+            self.assertEqual(layer_context.build("test-author", None, todo)["layer_size"], "small")
+            todo.write_text(original.replace("selected_layer: L10-domain", "selected_layer: L10-domain\nlayer_size: tiny"), encoding="utf-8")
+            with self.assertRaisesRegex(SystemExit, "invalid layer_size"):
+                layer_context.build("implementor", None, todo)
 
     def test_test_author_and_implementor_receive_separate_permissions(self) -> None:
         with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
@@ -794,6 +819,29 @@ Human approval pending.
 
 
 class WorkflowWiringTests(unittest.TestCase):
+    def test_execution_model_follows_approved_layer_size(self) -> None:
+        try:
+            from jinja2 import Environment
+        except ImportError:
+            self.skipTest("Jinja2 is unavailable")
+
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        for agent, context in (
+            ("agent_test_author", "test_author_context"),
+            ("implementor", "implementation_context"),
+            ("cleanup_implementor", "cleanup_implementation_context"),
+        ):
+            block = workflow.split(f"  - name: {agent}\n", 1)[1].split("\n  - name:", 1)[0]
+            model = block.split('model: "', 1)[1].split('"', 1)[0]
+            effort = block.split('effort: "', 1)[1].split('"', 1)[0]
+            for size, expected_model, expected_effort in (
+                ("small", "gpt-6-luna", "high"),
+                ("standard", "claude-sonnet-5.5", "medium"),
+            ):
+                values = {context: {"output": {"layer_size": size}}}
+                self.assertEqual(Environment().from_string(model).render(**values), expected_model)
+                self.assertEqual(Environment().from_string(effort).render(**values), expected_effort)
+
     def test_first_layer_todo_revision_renders_without_later_gates(self) -> None:
         try:
             from jinja2 import Environment, StrictUndefined

@@ -42,6 +42,13 @@ The layer map must include:
 - skeleton todo filename for each layer
 - open risks
 
+Size each layer before human approval. Set `layer_size: small` in its skeleton
+todo only when the approved work is documentation-only or one localized behavior
+with clear acceptance criteria, known tests, and no unresolved API, data, event,
+or cross-boundary decision. Otherwise set `layer_size: standard`. Split work
+that cannot fit one independently reviewable architectural boundary; model
+selection is not a reason to enlarge a layer.
+
 Classify every layer with exactly one routing value:
 
 - `work_kind: behavior` (default): adds or changes observable behavior and uses
@@ -71,7 +78,7 @@ Artifact style:
   - `## Open Risks` table with risk, affected layer, impact, and mitigation
   - `## Decision Log` table with decision, human comment, and timestamp
 - Skeleton todo files should also be visual-first:
-  - frontmatter first with `status: skeleton`, `owner: human`, `workflow: layered-tdd`, `work_kind: behavior` or `work_kind: cleanup`, and `selected_layer` set to that layer id when known
+  - frontmatter first with `status: skeleton`, `owner: human`, `workflow: layered-tdd`, `work_kind: behavior` or `work_kind: cleanup`, `layer_size: small` or `layer_size: standard`, and `selected_layer` set to that layer id when known
   - `## Boundary` table with allowed files/areas, forbidden files/areas, and behavior constraints
 
 Cleanup skeletons must also name the proposed replacement, migration

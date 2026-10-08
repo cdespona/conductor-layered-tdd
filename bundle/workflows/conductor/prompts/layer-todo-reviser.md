@@ -25,6 +25,8 @@ durable state.
 Hard rules:
 
 - Revise only `{{ layer_todo_generator.output.artifact_path }}`.
+- Preserve `layer_size` unless human feedback changes the approved boundary;
+  use `standard` when size becomes uncertain.
 - Keep the parent slice folder and selected layer unchanged.
 - Do not create, rename, or write a sibling plan folder or another todo.
 - Preserve the visual-first todo contract from

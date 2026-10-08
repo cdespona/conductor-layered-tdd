@@ -15,7 +15,7 @@ workflow:
   entry_point: preflight_tests
   runtime:
     provider: copilot
-    default_model: gpt-5.4
+    default_model: gpt-6-sol
     default_reasoning_effort: medium
   context:
     # Durable artifacts are the handoff between stages. Do not replay every
@@ -237,7 +237,7 @@ agents:
 
   - name: requirements_griller
     description: Capture requirements, blockers, assumptions, and slice split.
-    model: gpt-5.4
+    model: gpt-6-sol
     reasoning:
       effort: high
     input:
@@ -274,7 +274,7 @@ agents:
 
   - name: requirements_reviser
     description: Reconcile human feedback into the originally created requirements artifact.
-    model: gpt-5.4
+    model: gpt-6-sol
     reasoning:
       effort: high
     input:
@@ -322,7 +322,7 @@ agents:
 
   - name: slice_run_starter
     description: Create the slice-specific requirements artifact.
-    model: gpt-5.4
+    model: gpt-6-sol
     input:
       - requirements_griller.output.artifact_path
     prompt: !file prompts/slice-run-starter.md
@@ -344,7 +344,7 @@ agents:
 
   - name: slice_selection_reviser
     description: Reconcile human feedback into the originally created slice-selection artifact.
-    model: gpt-5.4
+    model: gpt-6-sol
     input:
       - requirements_griller.output.artifact_path
     prompt: !file prompts/slice-selection-reviser.md
@@ -366,7 +366,7 @@ agents:
 
   - name: slice_requirements_reviser
     description: Reconcile human feedback into the selected slice requirements artifact.
-    model: gpt-5.4
+    model: gpt-6-sol
     reasoning:
       effort: high
     input:
@@ -506,7 +506,7 @@ agents:
 
   - name: layer_mapper
     description: Map real repository boundaries and skeleton layer todos.
-    model: gpt-5.4
+    model: gpt-6-sol
     reasoning:
       effort: high
     input:
@@ -533,7 +533,7 @@ agents:
 
   - name: layer_map_reviser
     description: Reconcile human feedback into the active layer map.
-    model: gpt-5.4
+    model: gpt-6-sol
     reasoning:
       effort: high
     input:
@@ -684,7 +684,7 @@ agents:
 
   - name: cleanup_planner
     description: Detail one removal-only supersession chain without creating a red-test contract.
-    model: gpt-5.4
+    model: gpt-6-sol
     reasoning:
       effort: high
     input:
@@ -721,7 +721,7 @@ agents:
 
   - name: cleanup_plan_reviser
     description: Reconcile human feedback into the same cleanup plan.
-    model: gpt-5.4
+    model: gpt-6-sol
     reasoning:
       effort: high
     input:
@@ -958,9 +958,12 @@ agents:
 
   - name: cleanup_implementor
     description: Remove only the approved private supersession chain.
-    model: gpt-5.4
+    model: "{{ 'gpt-6-luna' if cleanup_implementation_context.output.layer_size == 'small' else 'claude-sonnet-5.5' }}"
+    reasoning:
+      effort: "{{ 'high' if cleanup_implementation_context.output.layer_size == 'small' else 'medium' }}"
     input:
       - cleanup_implementation_context.output.manifest_path
+      - cleanup_implementation_context.output.layer_size
       - cleanup_implementation_context.output.selected_layer
       - cleanup_implementation_context.output.todo_path
       - cleanup_implementation_context.output.allowed_paths
@@ -1087,7 +1090,7 @@ agents:
 
   - name: cleanup_reviewer
     description: Review one completed cleanup layer without inventing absence tests.
-    model: gpt-5.4
+    model: gpt-6-sol
     reasoning:
       effort: high
     input:
@@ -1191,7 +1194,7 @@ agents:
 
   - name: layer_todo_generator
     description: Detail the selected layer todo with Gherkin and TDD gate state.
-    model: gpt-5.4
+    model: gpt-6-sol
     reasoning:
       effort: high
     input:
@@ -1240,7 +1243,7 @@ agents:
 
   - name: layer_todo_reviser
     description: Reconcile human or checkpoint feedback into the active layer todo.
-    model: gpt-5.4
+    model: gpt-6-sol
     reasoning:
       effort: high
     input:
@@ -1278,7 +1281,7 @@ agents:
   - name: layer_todo_gate
     type: human_gate
     prompt: |
-      Review the selected layer todo. Approve the Gherkin and test ownership.
+      Review the selected layer todo, including `layer_size`. Approve the Gherkin and test ownership.
       The workflow then runs the configured full test suite as the deterministic
       red-test check before production implementation.
 
@@ -1410,9 +1413,10 @@ agents:
 
   - name: agent_test_author
     description: Author the approved top-level test without changing production code.
-    model: gpt-5.4
+    model: "{{ 'gpt-6-luna' if test_author_context.output.layer_size == 'small' else 'claude-sonnet-5.5' }}"
     input:
       - test_author_context.output.manifest_path
+      - test_author_context.output.layer_size
       - test_author_context.output.selected_layer
       - test_author_context.output.layer_map_path
       - test_author_context.output.todo_path
@@ -1432,7 +1436,7 @@ agents:
       - graphify_status.output.graph_available?
       - graphify_refresh.output?
     reasoning:
-      effort: high
+      effort: "{{ 'high' if test_author_context.output.layer_size == 'small' else 'medium' }}"
     prompt: !file prompts/agent-test-author.md
     output:
       selected_layer:
@@ -1652,9 +1656,12 @@ agents:
 
   - name: implementor
     description: Implement only inside the approved layer boundary.
-    model: gpt-5.4
+    model: "{{ 'gpt-6-luna' if implementation_context.output.layer_size == 'small' else 'claude-sonnet-5.5' }}"
+    reasoning:
+      effort: "{{ 'high' if implementation_context.output.layer_size == 'small' else 'medium' }}"
     input:
       - implementation_context.output.manifest_path
+      - implementation_context.output.layer_size
       - implementation_context.output.selected_layer
       - implementation_context.output.layer_map_path
       - implementation_context.output.todo_path
@@ -1788,7 +1795,7 @@ agents:
 
   - name: layer_reviewer
     description: Review one completed layer and record risks or gaps.
-    model: gpt-5.4
+    model: gpt-6-sol
     reasoning:
       effort: high
     input:
@@ -1890,7 +1897,7 @@ agents:
 
   - name: final_reviewer
     description: Review the whole selected slice and propose memory candidates.
-    model: gpt-5.4
+    model: gpt-6-sol
     reasoning:
       effort: high
     input:
@@ -1942,7 +1949,7 @@ agents:
 
   - name: memory_capturer
     description: Persist human-approved memory candidates from the final review.
-    model: gpt-5.4-mini
+    model: gpt-6-luna
     reasoning:
       effort: low
     input:

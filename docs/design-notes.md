@@ -283,18 +283,26 @@ Recommended routes:
 
 ## Agent Model Policy
 
-Model selection should be configured in the installed agents, not recorded in workflow artifacts.
+Model IDs live in the installed workflow, not in task artifacts. The approved
+layer todo records only `layer_size: small|standard`; missing values take the
+standard route. Conductor selects Luna with high reasoning for small test and
+implementation work, or Sonnet for standard work. Requirements and layer design
+use Sol. Documentation-only layers qualify as small; work spanning multiple
+architectural boundaries should be split before execution.
 
 Recommended defaults:
 
 | Agent responsibility | Model class |
 | -------------------- | ----------- |
 | Orchestration, artifact routing, gate detection | Cheap/free |
-| Requirements grill, slice detection, layer map proposal, Gherkin proposal | Strong |
-| Implementation for a small confirmed layer with top-level tests in place | Medium |
-| Final review | Strong |
+| Requirements grill, slice detection, layer map proposal, Gherkin proposal | GPT-6 Sol |
+| Test authoring and implementation of an approved small layer | GPT-6 Luna, high |
+| Test authoring and implementation of an approved standard layer | Claude Sonnet 5.5 |
+| Final review | GPT-6 Sol |
 
-Escalate implementation from medium to strong when tests are missing or waived, the layer touches multiple architectural boundaries, the area is safety-sensitive, verification fails repeatedly, or the agent discovers possible top-level behavior changes.
+When tests are missing or waived, the area is safety-sensitive, or verification
+fails repeatedly, treat the layer as standard and review its boundary. A new
+top-level behavior or cross-boundary need requires a human checkpoint or split.
 
 ## Final Review
 

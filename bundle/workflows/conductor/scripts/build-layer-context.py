@@ -351,6 +351,9 @@ def build(
         map_content = layer_map.read_text(encoding="utf-8")
 
     todo_content = todo.read_text(encoding="utf-8")
+    layer_size = frontmatter_value(todo_content, "layer_size") or "standard"
+    if layer_size not in {"small", "standard"}:
+        fail(f"invalid layer_size in {todo}: {layer_size!r} (expected small or standard)")
     strict_permissions = consumer in {"test-author", "implementor"}
     test_author_boundary = consumer == "test-author" and "## Test-Author Boundary\n" in todo_content
     allowed, forbidden, read_only = boundary_paths(
@@ -412,6 +415,7 @@ def build(
         "schema_version": 1,
         "consumer": consumer,
         "selected_layer": selected_layer,
+        "layer_size": layer_size,
         "layer_map_path": relative_map,
         "todo_path": relative_todo,
         "allowed_paths": allowed,

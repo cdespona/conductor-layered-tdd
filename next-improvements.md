@@ -84,7 +84,7 @@ flowchart TD
 | 5 | Add a deterministic revision fast path | Route-dependent | Avoid semantic reviser/test-author calls for metadata-only changes | Misclassifying a contract change as mechanical |
 | 6 | Add a derived layer context pack | Implemented; contract-preserving L10 rerun passed 2026-09-03 | Reduce repeated repository and artifact discovery | Duplicated, stale, or weakened contract state |
 | 7 | Prevent unnecessary micro-layers | Valid but risky | Avoid a full layer call cycle | Merging real architectural or test boundaries |
-| 8 | Route suitable tasks to cheaper models/reasoning | Secondary | Reduce cost and reasoning tokens | Lower-quality semantic decisions |
+| 8 | Route suitable tasks to cheaper models/reasoning | Implemented; repaired L10 diagnostic passed 2026-10-08; full comparison pending | Reduce cost and reasoning tokens | Lower-quality semantic decisions or extra checkpoints |
 
 ## Confirmed Leak: Verification Output
 
@@ -344,6 +344,18 @@ Validate this separately from log and context changes because changing the
 layer map changes the amount and shape of work.
 
 ## Model And Reasoning Routing
+
+The [2026-10-08 routing experiment](benchmarks/layered-tdd/results/2026-10-08-model-routing.md)
+now selects Luna High for approved small layers and Sonnet 5.5 Medium for standard
+test/implementation work, with Sol for design. The two pre-repair routed full
+runs passed; the third stopped after five model calls on a contradictory
+red-gate table. Its remaining cost is extrapolated from the two complete routed
+runs, yielding a provisional three-run median of $1.6334 versus a $2.5615
+two-run original-model midpoint (36.2% lower). Use this imputed third run for
+future cost planning, clearly labeled as an estimate. The deterministic
+recorder is repaired and its L10 diagnostic passed with Sonnet High. Sonnet
+Medium and the interrupted run's unfinished behavior remain unmeasured. Pause
+paid benchmarking until the token budget permits it.
 
 Cheaper model/reasoning routing primarily affects cost and reasoning tokens. It
 does not guarantee lower reported input tokens.
