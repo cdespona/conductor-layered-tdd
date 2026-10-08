@@ -30,7 +30,7 @@ flowchart TD
 
   M --> R{Allowed red-test<br/>gate state?}
   R -- no --> J
-  R -- yes --> S[Implementor<br/>Production code plus internal TDD tests<br/>inside approved layer boundary]
+  R -- yes --> S[Implementor<br/>Production code only<br/>approved tests frozen]
 
   S --> T{New top-level behavior<br/>or contradiction discovered?}
   T -- yes --> U[Layer checkpoint<br/>Human decision required]
@@ -81,8 +81,8 @@ flowchart TD
   subgraph PRINCIPLES[Principles]
     P1[One workflow run equals one selected slice]
     P2[Human gates top-level layer behavior]
-    P3[Agent owns internal TDD details inside approved boundary]
-    P4[Top-level tests are read-only by default]
+    P3[Implementor changes production code only]
+    P4[All tests frozen after red-test approval]
     P5[Memory capture requires human approval]
   end
 

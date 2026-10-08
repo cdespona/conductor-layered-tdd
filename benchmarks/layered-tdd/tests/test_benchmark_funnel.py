@@ -56,6 +56,21 @@ class PromptGrowthTests(unittest.TestCase):
 
 
 class DiagnosticScopeTests(unittest.TestCase):
+    def test_unexpected_checkpoint_is_recorded_as_non_comparable(self) -> None:
+        error = runner.UnexpectedGateError(
+            "red_suite_evidence_gate", "agent_test_checkpoint_gate"
+        )
+
+        outcome = runner.non_comparable_outcome(
+            error, "full", ("L10-domain", "L20-service", "L30-http")
+        )
+
+        self.assertEqual(outcome["status"], "non-comparable")
+        self.assertFalse(outcome["claim_eligible"])
+        self.assertEqual(outcome["reason"], "unexpected-human-gate")
+        self.assertEqual(outcome["unexpected_gate"], "agent_test_checkpoint_gate")
+        self.assertEqual(outcome["expected_gate"], "red_suite_evidence_gate")
+
     def test_runner_accepts_only_the_supported_one_layer_scope(self) -> None:
         self.assertEqual(
             runner.benchmark_scope(

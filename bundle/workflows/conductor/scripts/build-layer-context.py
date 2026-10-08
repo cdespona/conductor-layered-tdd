@@ -78,6 +78,16 @@ def selected_todo(layer_map: Path, selected_layer: str) -> Path:
         candidate = layers / name
         if candidate.is_file():
             return candidate
+    matches = [
+        path
+        for path in layers.glob("*.todo.md")
+        if frontmatter_value(path.read_text(encoding="utf-8"), "selected_layer")
+        == selected_layer
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        fail(f"multiple layer todos declare selected_layer {selected_layer}: {matches}")
     fail(f"selected layer todo does not exist under {layers}: {selected_layer}")
 
 
@@ -101,11 +111,57 @@ def clean_paths(values: list[str]) -> list[str]:
     return sorted(set(paths))
 
 
-def boundary_paths(todo_content: str) -> tuple[list[str], list[str], list[str]]:
+def normalize_declared_paths(values: list[str]) -> list[str]:
+    return sorted(
+        {
+            value.strip().rstrip("/.,;")
+            for value in values
+            if value.strip() and not value.strip().startswith("<")
+        }
+    )
+
+
+def permission_cell_paths(cell: str, column: str) -> list[str]:
+    """Parse one machine-readable boundary permission cell."""
+    value = cell.strip()
+    if value.casefold() == "none":
+        return []
+    paths = CODE_PATH.findall(value)
+    remainder = CODE_PATH.sub("", value)
+    if not paths or re.sub(r"[\s;,]+", "", remainder):
+        fail(
+            f"{column} boundary cell must be exact None or only backticked "
+            "paths/globs separated by semicolons"
+        )
+    invalid = [
+        path for path in paths
+        if path.startswith("/")
+        or any(part in {".", ".."} for part in PurePosixPath(path).parts)
+        or any(character.isspace() for character in path)
+    ]
+    if invalid:
+        fail(
+            f"{column} boundary cell contains invalid repository-relative paths: "
+            + ", ".join(invalid)
+        )
+    return paths
+
+
+def boundary_paths(
+    todo_content: str,
+    *,
+    strict_permissions: bool = False,
+    heading: str = "Implementation Boundary",
+) -> tuple[list[str], list[str], list[str]]:
     match = re.search(
-        r"(?ms)^## (?:Implementation )?Boundary\s*\n(?P<body>.*?)(?=^##\s|\Z)",
+        rf"(?ms)^## {re.escape(heading)}\s*\n(?P<body>.*?)(?=^##\s|\Z)",
         todo_content,
     )
+    if not match and heading == "Implementation Boundary":
+        match = re.search(
+            r"(?ms)^## Boundary\s*\n(?P<body>.*?)(?=^##\s|\Z)",
+            todo_content,
+        )
     if not match:
         return [], [], []
     rows = markdown_rows(match.group("body"))
@@ -119,19 +175,27 @@ def boundary_paths(todo_content: str) -> tuple[list[str], list[str], list[str]]:
     allowed: list[str] = []
     forbidden: list[str] = []
     read_only: list[str] = []
-    column_targets: dict[int, list[str]] = {}
+    column_targets: dict[int, tuple[str, list[str]]] = {}
     for index, header in enumerate(headers):
         if "forbid" in header:
-            column_targets[index] = forbidden
+            column_targets[index] = ("forbidden", forbidden)
         elif "read-only" in header or "readonly" in header:
-            column_targets[index] = read_only
+            column_targets[index] = ("read-only", read_only)
         elif "allow" in header and "?" not in header:
-            column_targets[index] = allowed
+            column_targets[index] = ("allowed", allowed)
     if column_targets:
         for row in data_rows:
-            for index, target in column_targets.items():
+            for index, (column, target) in column_targets.items():
                 if index < len(row):
-                    target.extend(CODE_PATH.findall(row[index]))
+                    if strict_permissions:
+                        target.extend(permission_cell_paths(row[index], column))
+                    else:
+                        target.extend(CODE_PATH.findall(row[index]))
+        return (
+            normalize_declared_paths(allowed),
+            normalize_declared_paths(forbidden),
+            normalize_declared_paths(read_only),
+        )
     else:
         status_index = next(
             (index for index, header in enumerate(headers) if "allow" in header),
@@ -148,6 +212,19 @@ def boundary_paths(todo_content: str) -> tuple[list[str], list[str], list[str]]:
             target = forbidden if "forbid" in status or status == "no" else read_only if "read-only" in status else allowed
             target.extend(CODE_PATH.findall(row[path_index]))
     return clean_paths(allowed), clean_paths(forbidden), clean_paths(read_only)
+
+
+def exact_boundary_conflicts(allowed: list[str], read_only: list[str]) -> list[str]:
+    """Return concrete paths declared both editable and read-only.
+
+    A broad allowed glob may intentionally contain a narrower read-only carve-out,
+    so only identical concrete paths are contradictory.
+    """
+    return sorted(
+        path
+        for path in set(allowed) & set(read_only)
+        if not any(character in path for character in "*?[")
+    )
 
 
 def within(path: str, boundary: str) -> bool:
@@ -274,7 +351,26 @@ def build(
         map_content = layer_map.read_text(encoding="utf-8")
 
     todo_content = todo.read_text(encoding="utf-8")
-    allowed, forbidden, read_only = boundary_paths(todo_content)
+    strict_permissions = consumer in {"test-author", "implementor"}
+    test_author_boundary = consumer == "test-author" and "## Test-Author Boundary\n" in todo_content
+    allowed, forbidden, read_only = boundary_paths(
+        todo_content,
+        strict_permissions=strict_permissions,
+        heading="Test-Author Boundary" if test_author_boundary else "Implementation Boundary",
+    )
+    if consumer == "test-author" and not test_author_boundary:
+        read_only = sorted(set(read_only + [path for path in allowed if not is_test_path(path)]))
+        allowed = [path for path in allowed if is_test_path(path)]
+    elif consumer == "implementor":
+        read_only = sorted(set(read_only + [path for path in allowed if is_test_path(path)]))
+        allowed = [path for path in allowed if not is_test_path(path)]
+    if strict_permissions:
+        boundary_conflicts = exact_boundary_conflicts(allowed, read_only)
+        if boundary_conflicts:
+            fail(
+                "layer todo declares concrete paths as both allowed and read-only: "
+                + ", ".join(boundary_conflicts)
+            )
     existing_allowed = expand_paths(root, allowed)
     existing_read_only = expand_paths(root, read_only)
     source_files = []

@@ -155,6 +155,14 @@ benchmarks/layered-tdd/scripts/materialize --variant graphify --graphify
 
 The materializer never overwrites an existing directory. With no `--destination`, it creates a new directory under `${TMPDIR:-/tmp}` and prints both its path and the exact Conductor command.
 
+## Registered Results
+
+Committed benchmark summaries and their compatibility decisions live under
+[`results/`](results/). Keep incomplete or non-comparable runs explicitly
+recorded, but exclude them from median claims.
+
+- [Pre-test-author versus completed test-author benchmark (2026-09-16)](results/2026-09-16-test-author-boundary-schema.md)
+
 ## Fixed Gate Playbook
 
 Follow [cases/idempotent-cancellation/gates.md](cases/idempotent-cancellation/gates.md) exactly. In particular:
@@ -178,7 +186,9 @@ python3 /absolute/path/to/benchmarks/layered-tdd/scripts/run-fixed-playbook.py \
 
 The runner waits for each named gate and provides its text field separately. It
 fails instead of guessing when the workflow reaches an unexpected revision or
-checkpoint route. It assigns a unique Conductor run ID and copies the runtime's
+checkpoint route. Such a run is recorded as non-comparable in
+`<run-log>.outcome.json` with `claim_eligible: false`, rather than being reported
+as an unexplained driver crash. It assigns a unique Conductor run ID and copies the runtime's
 authoritative event log beside the requested run log as
 `<run-log>.events.jsonl`.
 

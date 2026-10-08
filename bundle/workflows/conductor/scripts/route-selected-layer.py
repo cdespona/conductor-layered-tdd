@@ -40,6 +40,16 @@ def selected_todo(layer_map: Path, selected_layer: str) -> Path:
         candidate = layers / name
         if candidate.is_file():
             return candidate
+    matches = [
+        path
+        for path in layers.glob("*.todo.md")
+        if frontmatter_value(path.read_text(encoding="utf-8"), "selected_layer")
+        == selected_layer
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        fail(f"multiple layer todos declare selected_layer {selected_layer}: {matches}")
     fail(f"selected layer todo does not exist under {layers}: {selected_layer}")
 
 

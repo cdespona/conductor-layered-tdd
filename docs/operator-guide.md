@@ -903,13 +903,17 @@ Feature:
     Then
 ```
 
+## Test-Author Boundary
+
+| Allowed tests | Forbidden areas | Read-only production |
+| --- | --- | --- |
+| `test/path` | None | `src/path` |
+
 ## Implementation Boundary
 
-| Area | Allowed? | Notes |
-| --- | --- | --- |
-| Production files |  |  |
-| Top-level tests | read-only by default |  |
-| Internal tests | yes, inside boundary |  |
+| Allowed production | Forbidden areas | Top-level behavior limits | Read-only tests |
+| --- | --- | --- | --- |
+| `src/path` | None | Approved Gherkin only. | `test/path` |
 
 ## Task Board
 

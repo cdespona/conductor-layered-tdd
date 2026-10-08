@@ -54,8 +54,8 @@ Bounded layer-only patch:
 Tasks:
 
 1. Check whether implementation stayed inside the approved layer boundary.
-2. Check whether top-level tests remained read-only unless explicitly authorized.
-3. Check whether internal TDD work supports the approved behavior.
+2. Check whether the implementor left test files unchanged under its read-only boundary.
+3. Check whether the production change satisfies the approved behavior.
 4. Compare tests and implementation with every exact API signature, return
    shape, and fixed constraint in the original user contract. A locally green
    weaker API is not approval-worthy.

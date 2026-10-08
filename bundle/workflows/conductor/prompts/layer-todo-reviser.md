@@ -10,13 +10,13 @@ place.
 
 Available feedback (blank entries did not occur on the active route):
 
-- layer todo gate: {{ layer_todo_gate.output.additional_input.feedback | default("") }}
-- layer todo revision gate: {{ layer_todo_revision_gate.output.additional_input.feedback | default("") }}
-- red-suite evidence gate: {{ red_suite_evidence_gate.output.additional_input.feedback | default("") }}
-- test-author checkpoint: {{ agent_test_checkpoint_gate.output.additional_input.feedback | default("") }}
-- implementation checkpoint: {{ checkpoint_gate.output.additional_input.feedback | default("") }}
-- deterministic test-author preparation: {{ test_author_preparation_gate.output.additional_input.feedback | default("") }}
-- deterministic test-author result check: {{ test_author_result_gate.output.additional_input.feedback | default("") }}
+- layer todo gate: {% if layer_todo_gate is defined and layer_todo_gate.output is defined and layer_todo_gate.output.additional_input is defined %}{{ layer_todo_gate.output.additional_input.feedback | default("") }}{% endif %}
+- layer todo revision gate: {% if layer_todo_revision_gate is defined and layer_todo_revision_gate.output is defined and layer_todo_revision_gate.output.additional_input is defined %}{{ layer_todo_revision_gate.output.additional_input.feedback | default("") }}{% endif %}
+- red-suite evidence gate: {% if red_suite_evidence_gate is defined and red_suite_evidence_gate.output is defined and red_suite_evidence_gate.output.additional_input is defined %}{{ red_suite_evidence_gate.output.additional_input.feedback | default("") }}{% endif %}
+- test-author checkpoint: {% if agent_test_checkpoint_gate is defined and agent_test_checkpoint_gate.output is defined and agent_test_checkpoint_gate.output.additional_input is defined %}{{ agent_test_checkpoint_gate.output.additional_input.feedback | default("") }}{% endif %}
+- implementation checkpoint: {% if checkpoint_gate is defined and checkpoint_gate.output is defined and checkpoint_gate.output.additional_input is defined %}{{ checkpoint_gate.output.additional_input.feedback | default("") }}{% endif %}
+- deterministic test-author preparation: {% if test_author_preparation_gate is defined and test_author_preparation_gate.output is defined and test_author_preparation_gate.output.additional_input is defined %}{{ test_author_preparation_gate.output.additional_input.feedback | default("") }}{% endif %}
+- deterministic test-author result check: {% if test_author_result_gate is defined and test_author_result_gate.output is defined and test_author_result_gate.output.additional_input is defined %}{{ test_author_result_gate.output.additional_input.feedback | default("") }}{% endif %}
 
 Persist the immediately preceding Conductor gate decision and any non-empty gate
 comment in `## Decision Log`; update frontmatter only when that decision changes
@@ -29,6 +29,20 @@ Hard rules:
 - Do not create, rename, or write a sibling plan folder or another todo.
 - Preserve the visual-first todo contract from
   `workflows/conductor/prompts/layer-todo-generator.md`.
+- Keep the Scenario-to-Test Map aligned with revised scenarios and actual test
+  paths; a proposed new file may become an existing file without renaming tests.
+- Remove documentation-only scenarios from Gherkin and the Scenario-to-Test Map.
+  Keep the documentation update as a review task with human-readable completion
+  criteria; it needs no new test solely to assert Markdown wording.
+- Preserve distinct Test-Author and Implementation Boundaries. The former
+  permits test edits and keeps production read-only; the latter permits
+  production edits and keeps every approved test read-only. Each allowed,
+  forbidden, and read-only permission cell must be exact `None` or only
+  backticked repository-relative paths/globs separated by semicolons. Put
+  rationale outside those cells and never declare the same concrete path as
+  both allowed and read-only.
+- If the active todo has an older combined boundary, split it into those two
+  phase-specific tables during this revision.
 
 Return structured output:
 

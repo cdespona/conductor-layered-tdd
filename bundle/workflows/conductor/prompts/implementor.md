@@ -36,9 +36,11 @@ Original user contract:
 Hard rules:
 
 - Do not change top-level behavior beyond the approved Gherkin/test contract.
-- Treat human-written or human-confirmed top-level tests as read-only unless the todo explicitly allows a narrow mechanical update.
-- You may add lower-level internal tests inside the approved layer boundary.
-- Use TDD for internal tests: failing test first, minimum code to pass, refactor.
+- Do not create, modify, delete, or rename any test file. This applies even when
+  a test path appears in the todo's allowed areas: that area also serves the
+  earlier test-author phase. Treat approved tests as read-only.
+- If a test needs correction or a new test is needed, checkpoint for human
+  review instead of editing it.
 - If you discover new top-level behavior, a contradiction, or a need to expand scope, stop and record a checkpoint in the active layer todo.
 - When recording a checkpoint, update the active layer todo frontmatter to:
   - `status: checkpoint`
@@ -48,7 +50,7 @@ Hard rules:
   open only named projected paths when their excerpts are insufficient.
 - Treat the todo as authoritative and the context manifest as derived navigation
   evidence.
-- Run only focused tests needed for internal TDD. Do not rerun the full suite;
+- Run only focused tests needed to check implementation. Do not rerun the full suite;
   Conductor runs full verification after implementation.
 - Preserve exact API signatures and return shapes from the original user
   contract. If the approved todo or authored test weakened one, checkpoint
@@ -61,13 +63,12 @@ Tasks:
    and recent full-suite evidence in `## Evidence`. Do not rerun or reinterpret
    the red gate; Conductor has already verified and recorded it.
 3. Implement the minimal production changes for this layer only.
-4. Add internal tests where useful.
-5. If human routing is required, update the layer todo frontmatter to checkpoint state and add a `Human checkpoint decision needed` section that includes:
+4. If human routing is required, update the layer todo frontmatter to checkpoint state and add a `Human checkpoint decision needed` section that includes:
    - the discovered behavior, contradiction, or scope expansion
    - why it is not a private implementation detail
    - the smallest useful human decision
    - recommended checkpoint route: revise current layer todo, return to layer selection, proceed because it is not new top-level behavior, or stop
-6. If no human routing is required, update the layer todo with implementation notes.
+5. If no human routing is required, update the layer todo with implementation notes.
 
 Graphify implementation navigation:
 
@@ -83,14 +84,13 @@ Artifact update style:
   - `### Route Options` table with route, when to choose it, and consequence
   - one short summary sentence only if needed
 - If implementation completed without checkpoint, append a `## Implementation Notes` section with:
-  - `### Implementation Dashboard` table containing selected layer, files modified, internal tests added, checkpoint required, and next step
+  - `### Implementation Dashboard` table containing selected layer, files modified, checkpoint required, and next step
   - `### Change Matrix` table with file, change type, boundary fit, and notes
 
 Return structured output:
 
 - `selected_layer`: layer implemented
 - `files_modified`: files changed
-- `internal_tests_added`: tests added inside the layer boundary
 - `checkpoint_required`: true if human routing is required before continuing
 - `checkpoint_summary`: checkpoint details, or empty string
 - `summary`: implementation summary

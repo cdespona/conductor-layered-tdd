@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -22,6 +23,15 @@ UNEXPECTED_GATES = (
     "graphify_refresh_failure_gate",
 )
 FULL_LAYERS = ("L10-domain", "L20-service", "L30-http")
+
+
+class UnexpectedGateError(RuntimeError):
+    def __init__(self, expected_gate: str, unexpected_gate: str) -> None:
+        self.expected_gate = expected_gate
+        self.unexpected_gate = unexpected_gate
+        super().__init__(
+            f"unexpected gate before {expected_gate}: {unexpected_gate}"
+        )
 
 
 def benchmark_scope(case: dict[str, object]) -> tuple[str, tuple[str, ...]]:
@@ -63,6 +73,26 @@ def preserve_event_log(
     return destination
 
 
+def non_comparable_outcome(
+    error: UnexpectedGateError,
+    run_kind: str,
+    run_layers: tuple[str, ...],
+) -> dict[str, object]:
+    return {
+        "status": "non-comparable",
+        "claim_eligible": False,
+        "reason": "unexpected-human-gate",
+        "unexpected_gate": error.unexpected_gate,
+        "expected_gate": error.expected_gate,
+        "run_kind": run_kind,
+        "run_layers": list(run_layers),
+    }
+
+
+def write_outcome(path: Path, outcome: dict[str, object]) -> None:
+    path.write_text(json.dumps(outcome, indent=2) + "\n", encoding="utf-8")
+
+
 def resolve_gate(child: pexpect.spawn, name: str, option: int, field: str = "", value: str = "") -> None:
     unexpected = "|".join(UNEXPECTED_GATES)
     matched = child.expect(
@@ -72,8 +102,8 @@ def resolve_gate(child: pexpect.spawn, name: str, option: int, field: str = "", 
         ]
     )
     if matched == 1:
-        raise RuntimeError(
-            f"unexpected gate before {name}: {child.match.group('unexpected')}"
+        raise UnexpectedGateError(
+            name, child.match.group("unexpected")
         )
     child.expect(r"Select option \[[0-9/]+\]: ")
     child.sendline(str(option))
@@ -108,6 +138,7 @@ def main() -> None:
     run_log.parent.mkdir(parents=True, exist_ok=True)
     debug_log = run_log.with_name(f"{run_log.name}.conductor-debug.log")
     events_log = Path(f"{run_log}.events.jsonl")
+    outcome_log = Path(f"{run_log}.outcome.json")
     run_id = secrets.token_hex(8)
 
     command = [
@@ -142,24 +173,35 @@ def main() -> None:
         )
         child.logfile_read = log
 
-        resolve_gate(child, "graphify_update_gate", 3)
-        resolve_gate(child, "requirements_gate", 1, "feedback")
+        try:
+            resolve_gate(child, "graphify_update_gate", 3)
+            resolve_gate(child, "requirements_gate", 1, "feedback")
 
-        for index, layer in enumerate(run_layers):
-            resolve_gate(child, "layer_selection_gate", 1, "selected_layer", layer)
-            resolve_gate(child, "layer_todo_gate", 1, "feedback")
-            resolve_gate(child, "red_suite_evidence_gate", 1, "feedback")
-            approval_option, approval_field = layer_approval_response(
-                run_kind, index, len(run_layers)
-            )
-            resolve_gate(
-                child, "layer_approval_gate", approval_option, approval_field
-            )
+            for index, layer in enumerate(run_layers):
+                resolve_gate(child, "layer_selection_gate", 1, "selected_layer", layer)
+                resolve_gate(child, "layer_todo_gate", 1, "feedback")
+                resolve_gate(child, "red_suite_evidence_gate", 1, "feedback")
+                approval_option, approval_field = layer_approval_response(
+                    run_kind, index, len(run_layers)
+                )
+                resolve_gate(
+                    child, "layer_approval_gate", approval_option, approval_field
+                )
 
-        if run_kind == "full":
-            resolve_gate(child, "memory_gate", 2, "feedback")
-        child.expect(pexpect.EOF)
-        child.close()
+            if run_kind == "full":
+                resolve_gate(child, "memory_gate", 2, "feedback")
+            child.expect(pexpect.EOF)
+            child.close()
+        except UnexpectedGateError as error:
+            outcome = non_comparable_outcome(error, run_kind, run_layers)
+            write_outcome(outcome_log, outcome)
+            child.close(force=True)
+            preserve_event_log(run_id, events_log)
+            print(
+                f"Benchmark run is non-comparable: {error}. Outcome: {outcome_log}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1) from error
 
     preserved_events = preserve_event_log(run_id, events_log)
     if preserved_events is None and child.exitstatus == 0:

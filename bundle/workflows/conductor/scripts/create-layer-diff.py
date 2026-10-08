@@ -60,7 +60,10 @@ def boundary_paths(todo: Path) -> tuple[list[str], list[str]]:
     allowed: list[str] = []
     forbidden: list[str] = []
 
-    forbidden_columns = [index for index, header in enumerate(headers) if "forbid" in header]
+    forbidden_columns = [
+        index for index, header in enumerate(headers)
+        if "forbid" in header or "read-only" in header or "readonly" in header
+    ]
     allowed_columns = [
         index
         for index, header in enumerate(headers)

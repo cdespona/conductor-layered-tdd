@@ -283,7 +283,7 @@ class LayerDiffTests(unittest.TestCase):
         )
         self.assertEqual(
             forbidden,
-            [".benchmark", "internal/httpapi", "internal/legacy"],
+            [".benchmark", "internal/httpapi", "internal/legacy", "internal/orders/service_test.go"],
         )
         classification = layer_diff.classify(
             ["internal/orders/order.go", "internal/legacy/cancel.go"],
@@ -293,6 +293,10 @@ class LayerDiffTests(unittest.TestCase):
         self.assertEqual(classification["boundary_status"], "violated")
         self.assertEqual(
             classification["boundary_violations"], ["internal/legacy/cancel.go"]
+        )
+        self.assertEqual(
+            layer_diff.classify(["internal/orders/service_test.go"], allowed, forbidden)["boundary_status"],
+            "violated",
         )
 
 
@@ -328,7 +332,7 @@ Given a pending order, when it is cancelled, then its state is cancelled.
 
 | Allowed Areas | Forbidden Areas | Top-Level Behavior Limits | Read-Only Tests |
 | --- | --- | --- | --- |
-| `internal/orders/order.go`; `internal/orders/*_test.go` | `internal/legacy/` | Add cancellation only. | `internal/orders/service_test.go` |
+| `internal/orders/order.go`; `internal/orders/*_test.go` | `internal/legacy/`; `Makefile` | Add cancellation only. | `internal/orders/service_test.go` |
 
 ## Task Board
 """,
@@ -355,7 +359,7 @@ Given a pending order, when it is cancelled, then its state is cancelled.
 
         self.assertEqual(result["selected_layer"], "L10-domain")
         self.assertEqual(result["allowed_paths"], ["internal/orders/*_test.go", "internal/orders/order.go"])
-        self.assertEqual(result["forbidden_paths"], ["internal/legacy"])
+        self.assertEqual(result["forbidden_paths"], ["Makefile", "internal/legacy"])
         self.assertEqual(result["read_only_paths"], ["internal/orders/service_test.go"])
         self.assertIn("internal/orders/order.go", result["production_files"])
         self.assertIn("internal/orders/order_test.go", result["test_files"])
@@ -380,6 +384,143 @@ Given a pending order, when it is cancelled, then its state is cancelled.
         first_hash = next(item["sha256"] for item in first["source_files"] if item["path"] == "internal/orders/order.go")
         second_hash = next(item["sha256"] for item in second["source_files"] if item["path"] == "internal/orders/order.go")
         self.assertNotEqual(first_hash, second_hash)
+
+    def test_test_author_and_implementor_receive_separate_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            _, todo = self.create_project(Path(directory))
+            content = todo.read_text(encoding="utf-8")
+            content = content.replace(
+                "## Implementation Boundary\n",
+                """## Test-Author Boundary
+
+| Allowed Tests | Forbidden Areas | Read-Only Production |
+| --- | --- | --- |
+| `internal/orders/*_test.go` | `internal/legacy/` | `internal/orders/order.go` |
+
+## Implementation Boundary
+""",
+            ).replace(
+                "| `internal/orders/order.go`; `internal/orders/*_test.go` | `internal/legacy/`; `Makefile` | Add cancellation only. | `internal/orders/service_test.go` |",
+                "| `internal/orders/order.go` | `internal/legacy/`; `Makefile` | Add cancellation only. | `internal/orders/*_test.go` |",
+            )
+            todo.write_text(content, encoding="utf-8")
+            author = layer_context.build("test-author", None, todo)
+            implementor = layer_context.build("implementor", None, todo)
+
+        self.assertEqual(author["allowed_paths"], ["internal/orders/*_test.go"])
+        self.assertEqual(author["read_only_paths"], ["internal/orders/order.go"])
+        self.assertEqual(implementor["allowed_paths"], ["internal/orders/order.go"])
+        self.assertEqual(implementor["read_only_paths"], ["internal/orders/*_test.go"])
+
+    def test_legacy_combined_boundary_is_split_by_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            _, todo = self.create_project(Path(directory))
+            author = layer_context.build("test-author", None, todo)
+            implementor = layer_context.build("implementor", None, todo)
+
+        self.assertEqual(author["allowed_paths"], ["internal/orders/*_test.go"])
+        self.assertIn("internal/orders/order.go", author["read_only_paths"])
+        self.assertEqual(implementor["allowed_paths"], ["internal/orders/order.go"])
+        self.assertIn("internal/orders/*_test.go", implementor["read_only_paths"])
+
+    def test_mapper_skeleton_permissions_are_tolerant_before_todo_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            layer_map, todo = self.create_project(root)
+            todo.write_text(
+                todo.read_text(encoding="utf-8").replace(
+                    "| `internal/orders/order.go`; `internal/orders/*_test.go` | "
+                    "`internal/legacy/`; `Makefile` | Add cancellation only. | "
+                    "`internal/orders/service_test.go` |",
+                    "| Change `internal/orders/order.go` and add focused tests under "
+                    "`internal/orders/*_test.go`. | Do not touch `internal/legacy/` "
+                    "or `Makefile`. | Preserve public behavior. | Keep "
+                    "`internal/orders/service_test.go` unchanged. |",
+                ),
+                encoding="utf-8",
+            )
+
+            result = layer_context.build("todo-generator", layer_map, None)
+
+        self.assertEqual(
+            result["allowed_paths"],
+            ["internal/orders/*_test.go", "internal/orders/order.go"],
+        )
+        self.assertEqual(result["forbidden_paths"], ["Makefile", "internal/legacy"])
+        self.assertEqual(result["read_only_paths"], ["internal/orders/service_test.go"])
+
+    def test_generated_todo_permissions_reject_mapper_style_prose(self) -> None:
+        content = """## Implementation Boundary
+
+| Allowed Areas | Forbidden Areas | Top-Level Behavior Limits | Read-Only Tests |
+| --- | --- | --- | --- |
+| Change `internal/orders/order.go`. | `internal/legacy/` | Preserve public behavior. | None |
+"""
+
+        with self.assertRaisesRegex(
+            SystemExit,
+            "allowed boundary cell must be exact None or only backticked",
+        ):
+            layer_context.boundary_paths(content, strict_permissions=True)
+
+    def test_projection_rejects_exact_editable_read_only_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            _, todo = self.create_project(root)
+            todo.write_text(
+                todo.read_text(encoding="utf-8").replace(
+                    "`internal/orders/order.go`; `internal/orders/*_test.go`",
+                    "`internal/orders/order.go`; `internal/orders/*_test.go`; "
+                    "`internal/orders/service_test.go`",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "both allowed and read-only: internal/orders/service_test.go",
+            ):
+                layer_context.build("test-author", None, todo)
+
+    def test_none_read_only_cell_does_not_capture_writable_path_from_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            _, todo = self.create_project(root)
+            content = todo.read_text(encoding="utf-8")
+            content = content.replace(
+                "`internal/orders/order.go`; `internal/orders/*_test.go`",
+                "`internal/orders/order.go`; `internal/orders/*_test.go`; "
+                "`internal/orders/service_test.go`",
+            ).replace(
+                "`internal/orders/service_test.go` |\n\n## Task Board",
+                "None |\n\n## Task Board\n\n"
+                "Preserve existing behavior while extending "
+                "`internal/orders/service_test.go`.\n",
+            )
+            todo.write_text(content, encoding="utf-8")
+
+            result = layer_context.build("test-author", None, todo)
+
+        self.assertIn("internal/orders/service_test.go", result["allowed_paths"])
+        self.assertEqual(result["read_only_paths"], ["internal/orders/order.go"])
+
+    def test_permission_cell_rejects_prose_that_mentions_a_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            _, todo = self.create_project(root)
+            todo.write_text(
+                todo.read_text(encoding="utf-8").replace(
+                    "`internal/orders/service_test.go`",
+                    "None mandated. Prefer coverage in `internal/orders/service_test.go`",
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                SystemExit,
+                "read-only boundary cell must be exact None or only backticked",
+            ):
+                layer_context.build("test-author", None, todo)
 
     def test_test_author_contract_projection_omits_review_and_risk_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
@@ -541,6 +682,15 @@ class LayerWorkKindRoutingTests(unittest.TestCase):
             result = layer_router.classify(self.create_layer(Path(directory), None))
         self.assertEqual(result["work_kind"], "behavior")
 
+    def test_numbered_todo_resolves_by_selected_layer_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            layer_map = self.create_layer(Path(directory), "behavior")
+            todo = layer_map.parent / "layers" / "arbitrary-id.todo.md"
+            numbered = todo.with_name("10-arbitrary-id.todo.md")
+            todo.rename(numbered)
+            self.assertEqual(layer_router.classify(layer_map)["todo_path"], str(numbered))
+            self.assertEqual(layer_context.selected_todo(layer_map, "arbitrary-id"), numbered)
+
     def test_cleanup_is_explicit_and_independent_of_layer_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = layer_router.classify(self.create_layer(Path(directory), "cleanup"))
@@ -644,6 +794,19 @@ Human approval pending.
 
 
 class WorkflowWiringTests(unittest.TestCase):
+    def test_first_layer_todo_revision_renders_without_later_gates(self) -> None:
+        try:
+            from jinja2 import Environment, StrictUndefined
+        except ImportError:
+            self.skipTest("Jinja2 is unavailable")
+        prompt = (WORKFLOW_ROOT / "prompts" / "layer-todo-reviser.md").read_text(encoding="utf-8")
+        rendered = Environment(undefined=StrictUndefined).from_string(prompt).render(
+            layer_todo_generator={"output": {"artifact_path": "layers/L20.todo.md"}},
+            layer_todo_gate={"output": {"additional_input": {"feedback": "Remove docs-only Gherkin"}}},
+        )
+        self.assertIn("layer todo gate: Remove docs-only Gherkin", rendered)
+        self.assertIn("layer todo revision gate: ", rendered)
+
     def test_reviewer_has_no_raw_verification_stream_references(self) -> None:
         prompt = REVIEWER.read_text(encoding="utf-8")
         workflow = WORKFLOW.read_text(encoding="utf-8")
@@ -688,7 +851,7 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("to: test_author_context", workflow)
         self.assertNotIn("route: agent_test_author", workflow)
         self.assertIn("route: implementation_context", workflow)
-        self.assertNotIn("route: implementor", workflow)
+        self.assertNotIn("route: implementor\n", workflow)
 
     def test_projection_prompts_forbid_broad_discovery_and_full_suite_replays(self) -> None:
         todo_prompt = TODO_GENERATOR.read_text(encoding="utf-8")

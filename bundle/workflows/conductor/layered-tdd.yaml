@@ -198,9 +198,9 @@ agents:
         fi
 
         if [ -f "$graph_file" ]; then
-          graphify "$scope" --update --directed --no-viz >"$graph_log" 2>&1
+          graphify "$scope" --update --code-only --directed --no-viz >"$graph_log" 2>&1
         else
-          graphify "$scope" --directed --no-viz >"$graph_log" 2>&1
+          graphify "$scope" --code-only --directed --no-viz >"$graph_log" 2>&1
         fi
         graphify_exit_code=$?
 
@@ -1245,13 +1245,13 @@ agents:
       effort: high
     input:
       - layer_todo_generator.output.artifact_path
-      - layer_todo_gate.output.additional_input.feedback?
+      - layer_todo_gate.output?
       - layer_todo_revision_gate.output?
-      - red_suite_evidence_gate.output.additional_input.feedback?
-      - agent_test_checkpoint_gate.output.additional_input.feedback?
-      - checkpoint_gate.output.additional_input.feedback?
-      - test_author_preparation_gate.output.additional_input.feedback?
-      - test_author_result_gate.output.additional_input.feedback?
+      - red_suite_evidence_gate.output?
+      - agent_test_checkpoint_gate.output?
+      - checkpoint_gate.output?
+      - test_author_preparation_gate.output?
+      - test_author_result_gate.output?
     prompt: !file prompts/layer-todo-reviser.md
     output:
       artifact_path:
@@ -1680,9 +1680,6 @@ agents:
       files_modified:
         type: array
         description: Files created or changed.
-      internal_tests_added:
-        type: array
-        description: Internal tests added inside the approved boundary.
       checkpoint_required:
         type: boolean
         description: True when new top-level behavior or contradiction was found.

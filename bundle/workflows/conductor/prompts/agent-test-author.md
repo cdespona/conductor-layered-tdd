@@ -38,7 +38,7 @@ Original user contract:
 
 Hard rules:
 
-- Author or modify only the top-level test(s) explicitly approved by the Gherkin and implementation boundary.
+- Author or modify only the top-level test(s) explicitly approved by the Gherkin and Test-Author Boundary.
 - Do not edit the todo, layer map, context manifest, production code, generated
   artifacts, or unrelated tests. Artifact state transitions belong to scripts.
 - Do not run a targeted test command. Conductor runs the configured full suite

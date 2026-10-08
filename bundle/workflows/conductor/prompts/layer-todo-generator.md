@@ -51,6 +51,12 @@ Navigation rules:
   when its excerpt is insufficient for a precise boundary decision.
 - Do not run tests, lint, or security commands. The workflow owns deterministic
   verification after approval.
+- Treat the allowed, forbidden, and read-only boundary cells as machine-readable
+  path lists. Each cell must be exactly `None` or contain only backticked
+  repository-relative paths/globs separated by semicolons. Put rationale,
+  interface restrictions, exceptions, and guardrail behavior in the top-level
+  behavior limits, Task Board, or Risk Board instead. A concrete path must never
+  appear in both the allowed and read-only cells.
 - Preserve every exact API signature, return shape, required path, fixed layer,
   and prohibition in the original user contract. Do not replace an exact
   contract with a weaker behavioral paraphrase. If it conflicts with the map or
@@ -100,10 +106,22 @@ Artifact style:
   - frontmatter first, including `selected_layer`, `test_ownership`, and `red_gate_state`
   - `## Red-Test Gate` table with state, evidence command, observed result, waiver/approval reason, and whether production implementation may proceed
   - `## Behavior Contract` with concise Gherkin or equivalent examples
-  - `## Implementation Boundary` table with allowed areas, forbidden areas, top-level behavior limits, and read-only tests
+    for observable code behavior. Put documentation-only updates in a review
+    task with completion criteria, not a Gherkin scenario or a new test.
+  - `## Scenario-to-Test Map` table with one row per behavior scenario, its
+    repository-relative test file, whether that file exists or is proposed new,
+    and the observable assertion(s) it should prove. Use a concrete proposed
+    path for a new test file when possible; do not require test function names.
+  - `## Test-Author Boundary` table with allowed test paths, forbidden areas,
+    and read-only production paths. Test authors may write tests, not production.
+  - `## Implementation Boundary` table with allowed production paths, forbidden
+    areas, top-level behavior limits, and read-only test paths. Implementors may
+    write production and todo notes, never tests, even for internal coverage.
+    In both tables, permission cells are machine-readable: use exact `None` or
+    only backticked paths/globs separated by semicolons, with no prose.
   - `## Task Board` checklist table with task, type, owner, status, and notes.
     Use the exact type `top-level-test` for every human-approved top-level test
-    row; reserve other type values for production, internal tests, boundary, or
+    row; reserve other type values for production, boundary, or
     review work. This stable type lets deterministic scripts update only the
     approved test rows.
   - `## Risk Board` table with risk, trigger, mitigation, and checkpoint condition

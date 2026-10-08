@@ -52,8 +52,7 @@ flowchart TD
 | Gherkin | Each layer todo must include top-level Gherkin/test proposals. |
 | Test waiver | A layer can waive the top-level red-test gate only with an explicit human-approved reason. |
 | Red test gate | Top-level tests should be observed red before production code by default. Exceptions must be explicit. |
-| Top-level tests | Human-written or human-confirmed top-level tests are read-only for the implementor by default. |
-| Internal tests | The agent may add lower-level tests inside the approved layer boundary using TDD. |
+| Tests after red approval | All test files are read-only for the implementor. Test-author and implementor permissions are separate in the layer todo. |
 | Escalation | If implementation discovers new top-level behavior, stop and revise the layer todo before continuing. |
 | Checkpoints | Checkpoints are per layer, preferably appended to the active layer todo. |
 | Model policy | Model selection belongs in installed agent configuration, not task artifacts. Keep the orchestrator cheap/free-model friendly. Use stronger models for ambiguity-heavy phases, and medium implementation models for small confirmed layers with tests in place. |
@@ -189,7 +188,7 @@ Implementation mode is derived from test ownership:
 
 | Test ownership | Implementation behavior |
 | -------------- | ----------------------- |
-| `human-written` | After the red-test gate is approved, the agent works in production-code mode and may add internal supporting tests under TDD. |
+| `human-written` | After the red-test gate is approved, the agent changes production code only. |
 | `agent-written-after-approval` | The agent writes the approved top-level tests, stops for human confirmation, then resumes in production-code mode. |
 | `waived` | The agent works in production-code mode without a top-level red test; final review flags the waiver. |
 
@@ -227,8 +226,7 @@ Scenario: Missing external ID is rejected
 ## Agent Implementation Scope
 
 - Allowed: production domain code needed to satisfy the approved red tests.
-- Allowed: lower-level internal tests that support the approved behavior, following TDD.
-- Not allowed: adapters, UI, unrelated application wiring, or changing approved top-level behavior.
+- Not allowed: test-file edits, adapters, UI, unrelated application wiring, or changing approved top-level behavior.
 
 ## Gate
 
@@ -237,7 +235,7 @@ No production code until the approved top-level tests exist and are confirmed by
 
 ## TDD Boundary
 
-The top-level layer test contracts are human-gated. Internal implementation tests are not.
+The layer test contracts are human-gated. Test files are read-only for the implementor after red-test approval.
 
 Top-level tests should be observed red before production implementation by default:
 
@@ -253,19 +251,9 @@ Allowed values:
 - waived
 ```
 
-The agent may write additional lower-level tests when all of these are true:
-
-- the layer's top-level Gherkin proposals have been approved
-- required top-level red tests have an approved red-test gate state
-- the additional tests stay inside the approved layer scope
-- the additional tests do not introduce or redefine top-level business behavior
-- the agent follows red, green, refactor
-
-If the agent needs a new top-level scenario, edge case, business rule, or cross-layer behavior, it must stop and route back to the layer todo.
-
-Human-written or human-confirmed top-level tests are read-only for the implementor by default. If a top-level test is wrong, contradictory, or too broad, the implementor must stop and create a checkpoint for human review instead of changing the test to fit the implementation.
-
-Narrow mechanical test updates are allowed only when explicitly authorized, such as fixing an import path after an approved file move.
+If any test needs correction or addition, the implementor stops for human review.
+The layer todo has separate Test-Author and Implementation Boundaries so each
+agent sees only its own writable paths.
 
 ## Layer Checkpoints
 
