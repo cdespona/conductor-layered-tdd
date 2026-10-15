@@ -8,7 +8,8 @@ This project installs the runnable Microsoft Conductor layered-TDD workflow. Use
 flowchart LR
     Request["User request"] --> Preflight["Preflight checks"]
     Preflight --> Graphify{"Refresh Graphify?"}
-    Graphify --> Requirements["00-requirements.md"]
+    Graphify --> Triage{"Fast triage"}
+    Triage -->|"standard"| Requirements["00-requirements.md"]
     Requirements --> Slice{"Multiple slices?"}
     Slice -- "yes" --> SliceDoc["slice-selection.md"]
     SliceDoc --> SliceRun["fresh slice run"]
@@ -117,9 +118,9 @@ conductor run workflows/conductor/layered-tdd.yaml \
 
 `resume_path` is authoritative: the griller revises that folder's existing
 `00-requirements.md` and must not create a sibling plan folder. This is **not**
-`conductor resume`: it starts a new run at `fast_triage`, routes the existing
-plan to `preflight_tests`, then reaches the
-requirements griller. Frontmatter is useful context for that agent, but does
+`conductor resume`: it starts a new run at `preflight_tests`, then routes the
+existing plan through Graphify and `fast_triage` to the requirements griller.
+Frontmatter is useful context for that agent, but does
 not currently make Conductor skip already-completed phases.
 
 ### Start With Markdown Memory
@@ -143,7 +144,7 @@ conductor run workflows/conductor/layered-tdd.yaml \
 | `test_command` | `make test` | no | Preflight, red gate, and verification | Must be green before analysis and after implementation; after a newly added top-level test, its result is recorded as red/green evidence for human review. |
 | `lint_command` | `make lint` | no | Preflight and verification | Static checks. |
 | `security_command` | `make audit` | no | Preflight and verification | Dependency/CVE/audit checks. |
-| `graphify_scope` | none | no | Graphify refresh gate | Focused code directory for a first build or an explicit refresh. Leave empty to refresh an existing graph from its saved root. |
+| `graphify_scope` | repository root on first build; saved scan root on refresh | no | Graphify refresh gate | Optional code directory to narrow a build or refresh. |
 | `resume_path` | none | no | Requirements griller | Existing `.github/plans/<slug>` folder for a new run; pins requirements to that path but does not skip preflight or requirements. |
 | `memory_vault` | none | no | Requirements and final capture | Absolute Markdown memory vault root. |
 | `memory_namespace` | `machine/agent-memory` | no | Requirements and final capture | Namespace under the memory vault. |
@@ -179,16 +180,19 @@ shapes cannot be weakened by successive summaries.
 
 ```mermaid
 flowchart LR
-    Security["Preflight security"] --> Status["Detect graph"]
+    Preflight["Preflight"] --> Status["Detect graph"]
     Status --> Gate{"Refresh Graphify?"}
-    Gate -->|"focused scope"| Refresh["Build or update graph"]
-    Gate -->|"existing or skip"| Requirements["Requirements"]
-    Refresh --> Requirements
+    Gate -->|"use existing"| Triage["Fast triage"]
+    Gate -->|"skip"| Triage
+    Triage -->|"standard"| Requirements["Requirements"]
+    Triage -->|"fast"| Fast["Bounded change"]
+    Gate -->|"refresh"| Refresh["Build or update graph"]
+    Refresh --> Triage
 ```
 
-At the Graphify gate, use a focused code scope for the first build—such as
-`src`, `internal`, or `packages/api`—rather than a large mixed repository root.
-Pass it at start:
+At the Graphify gate, a first build scans repository code by default. To narrow
+the scan to a directory such as `src`, `internal`, or `packages/api`, pass it at
+start:
 
 ```bash
 conductor run workflows/conductor/layered-tdd.yaml \
@@ -658,18 +662,21 @@ Memory capture only uses Markdown memory. It does not use Engram or MCP memory t
 
 ## Stage-By-Stage Playbook
 
-### 0. Fast triage
+### 0. Preflight
 
-`fast_triage` returns a structured `fast` or `standard` route before preflight. Fast work is limited to at most three exact files and requires no new or changed tests. The short route snapshots the working tree, implements the change, checks the file boundary, runs test/lint/security, and asks for review and approval. If the implementor reports that tests or broader work are needed before editing, it joins the normal preflight. If it already changed files, a human gate handles the partial state.
+Every run starts with tests, lint, and security checks. A failing check reaches the preflight gate before Graphify or fast triage.
 
-### 1. Preflight
+### 1. Graphify and fast triage
+
+Graphify is offered after preflight and before `fast_triage`, so its graph can help locate the affected files and dependencies. `fast_triage` returns a structured `fast` or `standard` route. Fast work is limited to at most three exact files and requires no new or changed tests. The short route snapshots the working tree, implements the change, checks the file boundary, runs test/lint/security, and asks for review and approval. If the implementor reports that tests or broader work are needed before editing, it joins requirements. If it already changed files, a human gate handles the partial state.
+
+### Preflight checks
 
 ```mermaid
 flowchart LR
     Tests["test_command"] --> Lint["lint_command"]
     Lint --> Security["security_command"]
-    Security --> Graphify{"Refresh Graphify?"}
-    Graphify --> Requirements["requirements_griller"]
+    Security --> Graphify["graphify_status"]
     Tests -- fail --> Gate["preflight_failure_gate"]
     Lint -- fail --> Gate
     Security -- fail --> Gate

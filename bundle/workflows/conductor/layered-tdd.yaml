@@ -12,7 +12,7 @@ workflow:
   name: layered-tdd
   description: Fast route for bounded changes, layered TDD for the rest, with human approvals.
   version: "0.1.0"
-  entry_point: fast_triage
+  entry_point: preflight_tests
   runtime:
     provider: copilot
     default_model: gpt-6-sol
@@ -72,7 +72,7 @@ workflow:
     graphify_scope:
       type: string
       required: false
-      description: Relative code directory used only when the human asks Graphify to build or refresh its graph. Leave empty to reuse the saved graph root for an existing graph.
+      description: Optional relative code directory for Graphify. A first build defaults to the repository root; an existing graph reuses its saved scan root.
 
 agents:
   - name: fast_triage
@@ -83,6 +83,9 @@ agents:
     input:
       - workflow.input.request
       - workflow.input.resume_path?
+      - graphify_status.output?
+      - graphify_refresh.output?
+      - graphify_update_gate.output?
     prompt: !file prompts/fast-triage.md
     output:
       route:
@@ -100,7 +103,7 @@ agents:
     routes:
       - to: fast_snapshot
         when: "{{ output.route == 'fast' and output.allowed_paths | length > 0 and output.allowed_paths | length <= 3 }}"
-      - to: preflight_tests
+      - to: requirements_griller
 
   - name: fast_snapshot
     type: script
@@ -148,7 +151,7 @@ agents:
       - --allowed-paths-json
       - "{{ fast_triage.output.allowed_paths | tojson }}"
     routes:
-      - to: preflight_tests
+      - to: requirements_griller
         when: "{{ fast_implementor.output.needs_normal_path and output.changed_files | length == 0 }}"
       - to: fast_verification_tests
         when: "{{ not fast_implementor.output.needs_normal_path and output.boundary_status == 'passed' and output.changed_files | length > 0 }}"
@@ -329,19 +332,18 @@ agents:
 
       Current graph: {{ graphify_status.output.summary }}
 
-      For a first build, provide a focused code directory in the optional run
-      input `graphify_scope` (for example `src`, `internal`, or `packages/api`).
-      Do not use the repository root for a large mixed code-and-document corpus.
+      A first build scans repository code by default. To narrow the scan, provide
+      `graphify_scope` in the run input (for example `src` or `packages/api`).
     options:
       - label: Build or incrementally refresh the focused Graphify graph.
         value: refresh
         route: graphify_refresh
       - label: Use the existing graph without refreshing it.
         value: use_existing
-        route: requirements_griller
+        route: fast_triage
       - label: Continue without Graphify for this run.
         value: skip
-        route: requirements_griller
+        route: fast_triage
 
   - name: graphify_refresh
     type: script
@@ -360,8 +362,7 @@ agents:
         fi
 
         if [ -z "$scope" ]; then
-          printf '{"graph_available":false,"refresh_succeeded":false,"reason":"missing_scope","log_path":"%s","summary":"Graphify needs graphify_scope for its first focused build."}\n' "$graph_log"
-          exit 0
+          scope="."
         fi
         if [ ! -d "$scope" ]; then
           printf '{"graph_available":false,"refresh_succeeded":false,"reason":"invalid_scope","log_path":"%s","summary":"graphify_scope is not a readable directory."}\n' "$graph_log"
@@ -373,9 +374,9 @@ agents:
         fi
 
         if [ -f "$graph_file" ]; then
-          graphify "$scope" --update --code-only --directed --no-viz >"$graph_log" 2>&1
+          graphify "$scope" --update --code-only --directed --no-viz --out . >"$graph_log" 2>&1
         else
-          graphify "$scope" --code-only --directed --no-viz >"$graph_log" 2>&1
+          graphify "$scope" --code-only --directed --no-viz --out . >"$graph_log" 2>&1
         fi
         graphify_exit_code=$?
 
@@ -387,7 +388,7 @@ agents:
     env:
       GRAPHIFY_SCOPE: "{{ workflow.input.graphify_scope }}"
     routes:
-      - to: requirements_griller
+      - to: fast_triage
         when: "{{ output.refresh_succeeded }}"
       - to: graphify_refresh_failure_gate
 
@@ -400,13 +401,13 @@ agents:
       Reason: `{{ graphify_refresh.output.reason }}`
       Graphify log: `{{ graphify_refresh.output.log_path }}`
 
-      Correct the run input `graphify_scope` and restart if a first build needs
-      a narrower code directory. You can also continue safely without a graph.
+      Inspect the Graphify log, then restart with a corrected `graphify_scope`
+      or Graphify installation if needed. You can also continue without a graph.
     options:
       - label: Continue without Graphify for this run.
         value: continue_without_graph
-        route: requirements_griller
-      - label: Stop and restart with a focused graphify_scope.
+        route: fast_triage
+      - label: Stop and fix the Graphify setup.
         value: stop
         route: stopped
 

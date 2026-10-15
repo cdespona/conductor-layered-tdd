@@ -862,13 +862,19 @@ class FastBoundaryTests(unittest.TestCase):
 
 
 class WorkflowWiringTests(unittest.TestCase):
-    def test_fast_route_precedes_preflight_and_falls_back_when_tests_are_needed(self) -> None:
+    def test_preflight_precedes_graphify_and_fast_route(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         triage = workflow.split("  - name: fast_triage\n", 1)[1].split("\n  - name:", 1)[0]
+        security = workflow.split("  - name: preflight_security\n", 1)[1].split("\n  - name:", 1)[0]
+        preflight_gate = workflow.split("  - name: preflight_failure_gate\n", 1)[1].split("\n  - name:", 1)[0]
+        graphify_gate = workflow.split("  - name: graphify_update_gate\n", 1)[1].split("\n  - name:", 1)[0]
         change_check = workflow.split("  - name: fast_change_check\n", 1)[1].split("\n  - name:", 1)[0]
-        self.assertIn("entry_point: fast_triage", workflow)
-        self.assertIn("to: preflight_tests", triage)
-        self.assertIn("to: preflight_tests", change_check)
+        self.assertIn("entry_point: preflight_tests", workflow)
+        self.assertIn("to: graphify_status", security)
+        self.assertIn("route: graphify_status", preflight_gate)
+        self.assertIn("route: fast_triage", graphify_gate)
+        self.assertIn("to: requirements_griller", triage)
+        self.assertIn("to: requirements_griller", change_check)
         self.assertIn("output.changed_files | length == 0", change_check)
         self.assertIn("--allowed-paths-json", change_check)
 

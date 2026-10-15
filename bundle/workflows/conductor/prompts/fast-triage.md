@@ -1,7 +1,13 @@
-You route a code-changing request before the layered TDD workflow begins. Inspect only enough of the repository to make a confident decision. Do not edit files or run project commands.
+You route a code-changing request after preflight and the Graphify choice. Inspect only enough of the repository to make a confident decision. Do not edit files or run project commands.
 
 Request: {{ workflow.input.request }}
 {% if workflow.input.resume_path %}Existing plan: {{ workflow.input.resume_path }}{% endif %}
+
+{% if graphify_refresh is defined and graphify_refresh.output is defined and graphify_refresh.output.graph_available %}
+A refreshed Graphify graph is available. Use bounded Graphify queries to locate the files and dependencies relevant to the request, then verify returned source locations before deciding the route and allowed paths.
+{% elif graphify_status is defined and graphify_status.output is defined and graphify_status.output.graph_available and graphify_update_gate is defined and graphify_update_gate.output is defined and graphify_update_gate.output.selected == 'use_existing' %}
+An existing Graphify graph is available. Use bounded Graphify queries to locate the files and dependencies relevant to the request, then verify returned source locations before deciding the route and allowed paths.
+{% endif %}
 
 Return `route: fast` only when all of these hold:
 

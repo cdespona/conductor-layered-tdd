@@ -16,7 +16,7 @@ func TestInstallCopiesWorkflowAndCoreSkills(t *testing.T) {
 	if len(result.Created) == 0 {
 		t.Fatal("expected files to be created")
 	}
-	assertContains(t, filepath.Join(target, "workflows", "conductor", "layered-tdd.yaml"), "entry_point: fast_triage")
+	assertContains(t, filepath.Join(target, "workflows", "conductor", "layered-tdd.yaml"), "entry_point: preflight_tests")
 	assertContains(t, filepath.Join(target, ".github", "skills", "conductor-tdd", "SKILL.md"), "Test-Driven Development")
 	if _, err := os.Stat(filepath.Join(target, ".github", "skills", "conductor-memory-recall", "SKILL.md")); !os.IsNotExist(err) {
 		t.Fatalf("memory skill should be opt-in; stat error = %v", err)
@@ -121,7 +121,7 @@ func TestForceReplacesExistingEdits(t *testing.T) {
 	if len(result.Updated) != 1 {
 		t.Fatalf("updated = %v", result.Updated)
 	}
-	assertContains(t, workflow, "entry_point: fast_triage")
+	assertContains(t, workflow, "entry_point: preflight_tests")
 }
 
 func assertContains(t *testing.T, path, marker string) {

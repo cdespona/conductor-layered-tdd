@@ -29,11 +29,11 @@ Do not edit frontmatter or a dashboard to make the workflow advance. The workflo
 
 ```mermaid
 flowchart LR
-    T{"Fast triage"} -->|"small, no tests needed"| FI["Bounded implementation"]
+    P["Preflight: test, lint, audit"] --> Graphify{"Build or refresh Graphify?"}
+    Graphify --> T{"Fast triage"}
+    T -->|"small, no tests needed"| FI["Bounded implementation"]
     FI --> FV["Test, lint, audit"] --> FR["Review and approval"]
-    T -->|"standard or uncertain"| P["Preflight"]
-    P --> Graphify{"Refresh Graphify?"}
-    Graphify --> R["Requirements"]
+    T -->|"standard or uncertain"| R["Requirements"]
     R --> M["Layer map"]
     M --> LT["Layer todo and Gherkin"]
     LT --> S["Run full test suite"]
@@ -74,7 +74,7 @@ The default is `make test`. A non-zero result is captured as evidence rather tha
 | `test_command` | `make test` | Full suite: preflight, red evidence, and post-implementation verification. |
 | `lint_command` | `make lint` | Static checks before and after implementation. |
 | `security_command` | `make audit` | Dependency/CVE checks before and after implementation. |
-| `graphify_scope` | none | Focused code directory for a human-approved first Graphify build or refresh. Leave empty to refresh an existing graph from its saved root. |
+| `graphify_scope` | repository root on first build; saved scan root on refresh | Optional code directory to narrow a human-approved Graphify build or refresh. |
 | `resume_path` | none | Existing `.github/plans/<slug>` folder to continue. |
 | `memory_vault`, `memory_project` | none | Optional Markdown-memory recall and capture. |
 
@@ -82,7 +82,7 @@ The default is `make test`. A non-zero result is captured as evidence rather tha
 
 The first agent emits `route`, `reason`, `allowed_paths`, and an acceptance criterion. It chooses `fast` only for a documentation correction, small visual adjustment, or localized behavior-preserving refactor when no test must be added or changed and it can name up to three exact files. Uncertain scope and resumed plans use the normal route.
 
-The fast implementor can return to preflight before editing if it discovers that tests or broader design are needed. After editing, Conductor checks the changed files against the triage allowlist, then runs the configured test, lint, and security commands. A human reviews the bounded patch and approves or requests a fix. Out-of-boundary edits or failed checks stop at a human gate; the workflow never discards working-tree changes to force a fallback. Fast runs do not create layer-plan or memory artifacts.
+The fast implementor can return to requirements before editing if it discovers that tests or broader design are needed. Preflight has already run. After editing, Conductor checks the changed files against the triage allowlist, then runs the configured test, lint, and security commands. A human reviews the bounded patch and approves or requests a fix. Out-of-boundary edits or failed checks stop at a human gate; the workflow never discards working-tree changes to force a fallback. Fast runs do not create layer-plan or memory artifacts.
 
 Example for a repository with different Make targets:
 
@@ -102,12 +102,11 @@ The workflow now uses explicit context: agents receive only the named inputs
 they need. Markdown artifacts and Conductor gates are the durable handoff; raw
 verification output is passed only to the layer reviewer.
 
-After preflight, a human gate shows whether `graphify-out/graph.json` exists.
-Choose one path:
+After preflight and before fast triage, a human gate offers these paths:
 
 | Choice | Result |
 | --- | --- |
-| Refresh/build | Runs Graphify before requirements. A first build needs `graphify_scope` focused on code, such as `src` or `packages/api`. |
+| Refresh/build | Runs Graphify before requirements. A first build scans repository code by default; `graphify_scope` narrows the scan to a directory such as `src` or `packages/api`. |
 | Use existing | Keeps the current graph without spending time on an update. |
 | Continue without Graphify | Leaves the workflow fully functional; agents use normal focused repository inspection. |
 
