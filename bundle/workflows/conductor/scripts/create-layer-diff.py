@@ -138,14 +138,17 @@ def classify(
     }
 
 
-def create(snapshot: str, todo: Path, limit: int) -> dict[str, object]:
+def create(
+    snapshot: str, todo: Path | None, limit: int, allowed_paths: list[str] | None = None
+) -> dict[str, object]:
     git(["cat-file", "-e", f"{snapshot}^{{tree}}"])
     repository_root = Path(git(["rev-parse", "--show-toplevel"])).resolve()
-    resolved_todo = todo.resolve()
-    try:
-        todo_path = resolved_todo.relative_to(repository_root).as_posix()
-    except ValueError:
-        todo_path = ""
+    todo_path = ""
+    if todo is not None:
+        try:
+            todo_path = todo.resolve().relative_to(repository_root).as_posix()
+        except ValueError:
+            pass
     after = current_tree()
     names = git(["diff", "--name-only", "--find-renames", snapshot, after])
     changed = [line for line in names.splitlines() if line]
@@ -154,7 +157,7 @@ def create(snapshot: str, todo: Path, limit: int) -> dict[str, object]:
     with os.fdopen(descriptor, "wb") as handle:
         handle.write(patch)
     bounded = patch[:limit].decode("utf-8", errors="replace")
-    allowed, forbidden = boundary_paths(todo)
+    allowed, forbidden = boundary_paths(todo) if todo is not None else (allowed_paths or [], [])
     result = {
         "snapshot_tree": snapshot,
         "current_tree": after,
@@ -165,19 +168,49 @@ def create(snapshot: str, todo: Path, limit: int) -> dict[str, object]:
         "bounded_patch_bytes": len(bounded.encode("utf-8")),
         "patch_truncated": len(patch) > limit,
     }
-    result.update(classify(changed, allowed, forbidden, [todo_path] if todo_path else []))
+    if todo is None:
+        invalid = [
+            path for path in allowed
+            if not isinstance(path, str)
+            or not path
+            or PurePosixPath(path).is_absolute()
+            or ".." in PurePosixPath(path).parts
+            or any(character in path for character in "*?[]")
+            or (repository_root / path).is_dir()
+            or (repository_root / path).is_symlink()
+            or PurePosixPath(path).name == "AGENTS.md"
+            or path == ".github/copilot-instructions.md"
+            or path.startswith(".github/instructions/")
+            or re.search(r"(^|/)(tests?|__tests__)/|(^|/)(test_[^/]+|[^/]+_test\.[^/]+|[^/]+\.(test|spec)\.[^/]+)$", path)
+        ]
+        violations = invalid + [path for path in changed if path not in allowed]
+        result.update({
+            "boundary_status": "passed" if allowed and len(allowed) <= 3 and not violations else "violated",
+            "allowed_paths": allowed,
+            "forbidden_paths": [],
+            "boundary_violations": sorted(set(violations)),
+        })
+    else:
+        result.update(classify(changed, allowed, forbidden, [todo_path] if todo_path else []))
     return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--snapshot-tree", required=True)
-    parser.add_argument("--todo", required=True, type=Path)
+    boundary = parser.add_mutually_exclusive_group(required=True)
+    boundary.add_argument("--todo", type=Path)
+    boundary.add_argument("--allowed-paths-json")
     parser.add_argument("--max-patch-bytes", type=int, default=DEFAULT_PATCH_BYTES)
     args = parser.parse_args()
     if args.max_patch_bytes < 0:
         parser.error("--max-patch-bytes must be non-negative")
-    print(json.dumps(create(args.snapshot_tree, args.todo, args.max_patch_bytes)))
+    allowed_paths = json.loads(args.allowed_paths_json) if args.allowed_paths_json is not None else None
+    if allowed_paths is not None and (
+        not isinstance(allowed_paths, list) or not all(isinstance(path, str) for path in allowed_paths)
+    ):
+        parser.error("--allowed-paths-json must contain an array of paths")
+    print(json.dumps(create(args.snapshot_tree, args.todo, args.max_patch_bytes, allowed_paths)))
 
 
 if __name__ == "__main__":

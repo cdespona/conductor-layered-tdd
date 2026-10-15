@@ -1,6 +1,6 @@
 # Conductor Layered TDD
 
-`ltdd` installs and safely updates a self-contained Microsoft Conductor workflow for taking one code-changing slice from requirements through layered TDD and human review.
+`ltdd` installs and safely updates a self-contained Microsoft Conductor workflow. Clearly bounded changes that need no new tests take a short implementation and review route; other requests use layered TDD.
 
 ## Quick path
 
@@ -24,7 +24,7 @@ conductor run workflows/conductor/layered-tdd.yaml \
 ```mermaid
 flowchart LR
     CLI["ltdd CLI"] --> Bundle["Canonical embedded bundle"]
-    Bundle --> Workflow["Workflow · 16 prompts · recorder"]
+    Bundle --> Workflow["Workflow · prompts · recorder"]
     Bundle --> Skills["5 core + 3 optional memory skills"]
     Repo["This repository"] --> Docs["Guides · diagrams · design notes"]
     Repo --> Bench["Reproducible benchmark harness"]

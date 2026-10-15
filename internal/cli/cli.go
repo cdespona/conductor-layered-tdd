@@ -85,7 +85,7 @@ func runValidate(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("read installed workflow %q: %w", workflow, err)
 	}
 	for _, marker := range []string{
-		"entry_point: preflight_tests",
+		"entry_point: fast_triage",
 		"mode: explicit",
 		"layer_selection_gate.output.additional_input.selected_layer",
 		"layer_map_revision_gate.output.additional_input.selected_layer",

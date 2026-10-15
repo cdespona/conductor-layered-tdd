@@ -10,9 +10,9 @@
 # available through Conductor/Copilot CLI.
 workflow:
   name: layered-tdd
-  description: Requirements-first, layer-gated TDD workflow with human approvals.
+  description: Fast route for bounded changes, layered TDD for the rest, with human approvals.
   version: "0.1.0"
-  entry_point: preflight_tests
+  entry_point: fast_triage
   runtime:
     provider: copilot
     default_model: gpt-6-sol
@@ -75,6 +75,181 @@ workflow:
       description: Relative code directory used only when the human asks Graphify to build or refresh its graph. Leave empty to reuse the saved graph root for an existing graph.
 
 agents:
+  - name: fast_triage
+    description: Route only clearly bounded work that needs no new or changed tests.
+    model: gpt-6-luna
+    reasoning:
+      effort: high
+    input:
+      - workflow.input.request
+      - workflow.input.resume_path?
+    prompt: !file prompts/fast-triage.md
+    output:
+      route:
+        type: string
+        description: Exactly fast or standard.
+      reason:
+        type: string
+        description: Why the request qualifies or needs the full workflow.
+      allowed_paths:
+        type: array
+        description: Exact repository-relative files permitted for fast implementation; empty for standard.
+      acceptance_criteria:
+        type: string
+        description: Observable completion check for a fast request.
+    routes:
+      - to: fast_snapshot
+        when: "{{ output.route == 'fast' and output.allowed_paths | length > 0 and output.allowed_paths | length <= 3 }}"
+      - to: preflight_tests
+
+  - name: fast_snapshot
+    type: script
+    description: Preserve the working tree before fast implementation.
+    command: python3
+    args:
+      - workflows/conductor/scripts/capture-layer-snapshot.py
+    routes:
+      - to: fast_implementor
+
+  - name: fast_implementor
+    description: Make one bounded change or return untouched to the full workflow.
+    model: gpt-6-luna
+    reasoning:
+      effort: high
+    input:
+      - workflow.input.request
+      - fast_triage.output.reason
+      - fast_triage.output.allowed_paths
+      - fast_triage.output.acceptance_criteria
+      - fast_approval_gate.output?
+      - fast_blocked_gate.output?
+    prompt: !file prompts/fast-implementor.md
+    output:
+      needs_normal_path:
+        type: boolean
+        description: True only when the request needs tests, broader scope, or unresolved decisions.
+      summary:
+        type: string
+        description: Completed change or reason for returning to the full workflow.
+    routes:
+      - to: fast_change_check
+
+  - name: fast_change_check
+    type: script
+    description: Verify the fast diff is confined to triage-approved files.
+    input:
+      - fast_snapshot.output.snapshot_tree
+      - fast_triage.output.allowed_paths
+    command: python3
+    args:
+      - workflows/conductor/scripts/create-layer-diff.py
+      - --snapshot-tree
+      - "{{ fast_snapshot.output.snapshot_tree }}"
+      - --allowed-paths-json
+      - "{{ fast_triage.output.allowed_paths | tojson }}"
+    routes:
+      - to: preflight_tests
+        when: "{{ fast_implementor.output.needs_normal_path and output.changed_files | length == 0 }}"
+      - to: fast_verification_tests
+        when: "{{ not fast_implementor.output.needs_normal_path and output.boundary_status == 'passed' and output.changed_files | length > 0 }}"
+      - to: fast_blocked_gate
+
+  - name: fast_verification_tests
+    type: script
+    description: Run the configured test command after the fast change.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - fast-tests
+      - --command
+      - "{{ workflow.input.test_command }}"
+    timeout: 600
+    routes:
+      - to: fast_verification_lint
+
+  - name: fast_verification_lint
+    type: script
+    description: Run lint/static checks after the fast change.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - fast-lint
+      - --command
+      - "{{ workflow.input.lint_command }}"
+    timeout: 600
+    routes:
+      - to: fast_verification_security
+
+  - name: fast_verification_security
+    type: script
+    description: Run dependency/security checks after the fast change.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - fast-security
+      - --command
+      - "{{ workflow.input.security_command }}"
+    timeout: 600
+    routes:
+      - to: fast_approval_gate
+        when: "{{ fast_verification_tests.output.exit_code == 0 and fast_verification_lint.output.exit_code == 0 and output.exit_code == 0 }}"
+      - to: fast_blocked_gate
+
+  - name: fast_approval_gate
+    type: human_gate
+    prompt: |
+      Review the fast change and its checks.
+
+      Request: {{ workflow.input.request }}
+      Acceptance criterion: {{ fast_triage.output.acceptance_criteria }}
+      Files: {{ fast_change_check.output.changed_files }}
+      Change: {{ fast_implementor.output.summary }}
+      Tests/lint/security: {{ fast_verification_tests.output.exit_code }} / {{ fast_verification_lint.output.exit_code }} / {{ fast_verification_security.output.exit_code }}
+      Patch: `{{ fast_change_check.output.patch_path }}`{% if fast_change_check.output.patch_truncated %} (preview truncated){% endif %}
+
+      ```diff
+      {{ fast_change_check.output.bounded_patch }}
+      ```
+    options:
+      - label: Approve this fast change.
+        value: approve
+        route: fast_done
+      - label: Request a focused fix.
+        value: fix
+        prompt_for: feedback
+        route: fast_implementor
+      - label: Stop this run.
+        value: stop
+        route: stopped
+
+  - name: fast_blocked_gate
+    type: human_gate
+    input:
+      - fast_change_check.output?
+      - fast_verification_tests.output?
+      - fast_verification_lint.output?
+      - fast_verification_security.output?
+    prompt: |
+      The fast path could not finish safely. Inspect the changed files and checks before retrying.
+      Changed files: {{ fast_change_check.output.changed_files }}
+      Boundary: {{ fast_change_check.output.boundary_status }}
+      Boundary violations: {{ fast_change_check.output.boundary_violations }}
+      Implementor: {{ fast_implementor.output.summary }}
+      {% if fast_verification_tests is defined and fast_verification_tests.output is defined %}Tests: {{ fast_verification_tests.output.exit_code }} — {{ fast_verification_tests.output.bounded_excerpt }}{% endif %}
+      {% if fast_verification_lint is defined and fast_verification_lint.output is defined %}Lint: {{ fast_verification_lint.output.exit_code }} — {{ fast_verification_lint.output.bounded_excerpt }}{% endif %}
+      {% if fast_verification_security is defined and fast_verification_security.output is defined %}Security: {{ fast_verification_security.output.exit_code }} — {{ fast_verification_security.output.bounded_excerpt }}{% endif %}
+    options:
+      - label: Request a focused fix inside the original boundary.
+        value: fix
+        prompt_for: feedback
+        route: fast_implementor
+      - label: Stop and resolve the working tree manually.
+        value: stop
+        route: stopped
+
   - name: preflight_tests
     type: script
     description: Run the test suite before spending model time on analysis.
@@ -1985,6 +2160,19 @@ agents:
     output_template:
       status: stopped
       reason: Human stopped the layered TDD workflow.
+
+  - name: fast_done
+    type: terminate
+    status: success
+    input:
+      - fast_change_check.output.changed_files
+      - fast_implementor.output.summary
+    reason: Fast change approved.
+    output_template:
+      status: complete
+      route: fast
+      changed_files: "{{ fast_change_check.output.changed_files }}"
+      summary: "{{ fast_implementor.output.summary }}"
 
   - name: done
     type: terminate

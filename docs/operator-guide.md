@@ -117,7 +117,8 @@ conductor run workflows/conductor/layered-tdd.yaml \
 
 `resume_path` is authoritative: the griller revises that folder's existing
 `00-requirements.md` and must not create a sibling plan folder. This is **not**
-`conductor resume`: it starts a new run at `preflight_tests`, then reaches the
+`conductor resume`: it starts a new run at `fast_triage`, routes the existing
+plan to `preflight_tests`, then reaches the
 requirements griller. Frontmatter is useful context for that agent, but does
 not currently make Conductor skip already-completed phases.
 
@@ -656,6 +657,10 @@ Memory capture only uses Markdown memory. It does not use Engram or MCP memory t
 | Vault or project input is missing. | Capture is skipped and final review records why. |
 
 ## Stage-By-Stage Playbook
+
+### 0. Fast triage
+
+`fast_triage` returns a structured `fast` or `standard` route before preflight. Fast work is limited to at most three exact files and requires no new or changed tests. The short route snapshots the working tree, implements the change, checks the file boundary, runs test/lint/security, and asks for review and approval. If the implementor reports that tests or broader work are needed before editing, it joins the normal preflight. If it already changed files, a human gate handles the partial state.
 
 ### 1. Preflight
 

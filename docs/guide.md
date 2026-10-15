@@ -1,6 +1,6 @@
 # Conductor Layered TDD
 
-Use this workflow to take one code-changing slice from requirements to a reviewed implementation. You decide the behavior at Conductor gates; the workflow records the resulting state, comment, and evidence in local Markdown artifacts.
+Use this workflow to take one code-changing slice to a reviewed implementation. Initial triage sends clearly bounded changes that need no new or changed tests through a shorter route; other requests use layered TDD. You decide the behavior at Conductor gates; the full route records the resulting state, comment, and evidence in local Markdown artifacts.
 
 ## Quick path
 
@@ -29,14 +29,17 @@ Do not edit frontmatter or a dashboard to make the workflow advance. The workflo
 
 ```mermaid
 flowchart LR
-    P["Preflight"] --> Graphify{"Refresh Graphify?"}
+    T{"Fast triage"} -->|"small, no tests needed"| FI["Bounded implementation"]
+    FI --> FV["Test, lint, audit"] --> FR["Review and approval"]
+    T -->|"standard or uncertain"| P["Preflight"]
+    P --> Graphify{"Refresh Graphify?"}
     Graphify --> R["Requirements"]
     R --> M["Layer map"]
-    M --> T["Layer todo and Gherkin"]
-    T --> S["Run full test suite"]
+    M --> LT["Layer todo and Gherkin"]
+    LT --> S["Run full test suite"]
     S --> ReviewGate{"Human reviews evidence"}
     ReviewGate -->|"approved"| I["Implementation"]
-    ReviewGate -->|"revise"| T
+    ReviewGate -->|"revise"| LT
     I --> V["Test, lint, audit"]
     V --> F["Layer and final review"]
 ```
@@ -74,6 +77,12 @@ The default is `make test`. A non-zero result is captured as evidence rather tha
 | `graphify_scope` | none | Focused code directory for a human-approved first Graphify build or refresh. Leave empty to refresh an existing graph from its saved root. |
 | `resume_path` | none | Existing `.github/plans/<slug>` folder to continue. |
 | `memory_vault`, `memory_project` | none | Optional Markdown-memory recall and capture. |
+
+## Fast route
+
+The first agent emits `route`, `reason`, `allowed_paths`, and an acceptance criterion. It chooses `fast` only for a documentation correction, small visual adjustment, or localized behavior-preserving refactor when no test must be added or changed and it can name up to three exact files. Uncertain scope and resumed plans use the normal route.
+
+The fast implementor can return to preflight before editing if it discovers that tests or broader design are needed. After editing, Conductor checks the changed files against the triage allowlist, then runs the configured test, lint, and security commands. A human reviews the bounded patch and approves or requests a fix. Out-of-boundary edits or failed checks stop at a human gate; the workflow never discards working-tree changes to force a fallback. Fast runs do not create layer-plan or memory artifacts.
 
 Example for a repository with different Make targets:
 

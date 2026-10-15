@@ -818,7 +818,60 @@ Human approval pending.
         self.assertTrue(result["passed"])
 
 
+class FastBoundaryTests(unittest.TestCase):
+    def test_fast_diff_allows_only_named_files_and_preserves_existing_edits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q"], check=True)
+            (root / "README.md").write_text("original\n", encoding="utf-8")
+            (root / "notes.md").write_text("original\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], check=True)
+            subprocess.run([
+                "git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                "commit", "-qm", "initial",
+            ], check=True)
+            (root / "notes.md").write_text("user edit\n", encoding="utf-8")
+            before = str(snapshot.capture()["snapshot_tree"])
+            (root / "README.md").write_text("fast edit\n", encoding="utf-8")
+            allowed = layer_diff.create(before, None, 16_384, ["README.md"])
+            self.assertEqual(allowed["changed_files"], ["README.md"])
+            self.assertEqual(allowed["boundary_status"], "passed")
+            (root / "notes.md").write_text("changed again\n", encoding="utf-8")
+            outside = layer_diff.create(before, None, 16_384, ["README.md"])
+            self.assertEqual(outside["boundary_status"], "violated")
+            self.assertEqual(outside["boundary_violations"], ["notes.md"])
+
+    def test_fast_diff_rejects_test_paths_and_directory_allowlists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q"], check=True)
+            (root / "README.md").write_text("original\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], check=True)
+            subprocess.run([
+                "git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                "commit", "-qm", "initial",
+            ], check=True)
+            before = str(snapshot.capture()["snapshot_tree"])
+            (root / "test_feature.py").write_text("assert True\n", encoding="utf-8")
+            result = layer_diff.create(before, None, 16_384, ["test_feature.py"])
+            self.assertEqual(result["boundary_status"], "violated")
+            result = layer_diff.create(before, None, 16_384, ["."])
+            self.assertEqual(result["boundary_status"], "violated")
+            result = layer_diff.create(before, None, 16_384, ["AGENTS.md"])
+            self.assertEqual(result["boundary_status"], "violated")
+
+
 class WorkflowWiringTests(unittest.TestCase):
+    def test_fast_route_precedes_preflight_and_falls_back_when_tests_are_needed(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        triage = workflow.split("  - name: fast_triage\n", 1)[1].split("\n  - name:", 1)[0]
+        change_check = workflow.split("  - name: fast_change_check\n", 1)[1].split("\n  - name:", 1)[0]
+        self.assertIn("entry_point: fast_triage", workflow)
+        self.assertIn("to: preflight_tests", triage)
+        self.assertIn("to: preflight_tests", change_check)
+        self.assertIn("output.changed_files | length == 0", change_check)
+        self.assertIn("--allowed-paths-json", change_check)
+
     def test_execution_model_follows_approved_layer_size(self) -> None:
         try:
             from jinja2 import Environment
