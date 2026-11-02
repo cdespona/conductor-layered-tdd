@@ -226,7 +226,7 @@ func claudeWorkflow(source []byte) ([]byte, error) {
 	value = strings.Replace(value, "# This workflow assumes the Copilot provider and local repository tools are\n# available through Conductor/Copilot CLI.", "# This installed variant uses Claude Code through Conductor's Claude Agent SDK.\n# Sign in with `claude auth login` before running it.", 1)
 	value = strings.Replace(value, "    default_reasoning_effort: medium\n", "", 1)
 	effortBlocks := regexp.MustCompile(`(?m)^    reasoning:\n      effort: [^\n]+\n`)
-	if len(effortBlocks.FindAllString(value, -1)) != 18 {
+	if len(effortBlocks.FindAllString(value, -1)) != 20 {
 		return nil, fmt.Errorf("canonical workflow reasoning blocks changed; update Claude provider rendering")
 	}
 	value = effortBlocks.ReplaceAllString(value, "")

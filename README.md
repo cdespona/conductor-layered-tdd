@@ -1,6 +1,6 @@
 # Conductor Layered TDD
 
-`ltdd` installs and safely updates a self-contained Microsoft Conductor workflow. Clearly bounded changes that need no new tests take a short implementation and review route; other requests use layered TDD.
+`ltdd` installs and safely updates a self-contained Microsoft Conductor workflow. Clearly bounded changes that need no new tests take a short implementation and review route; other requests prepare executable slice acceptance before layered TDD.
 
 ## Quick path
 
@@ -38,6 +38,27 @@ flowchart LR
 | Operator guide | [`docs/operator-guide.md`](docs/operator-guide.md) |
 | Design history | [`docs/design-notes.md`](docs/design-notes.md) |
 | Benchmark harness | [`benchmarks/layered-tdd/`](benchmarks/layered-tdd/) |
+
+## Slice acceptance before layers
+
+```mermaid
+flowchart LR
+    R[Slice Gherkin] --> D[Support design and human decisions]
+    D --> A[Human approves exact scope]
+    A --> B[Build AT, DSL, drivers and data setup]
+    B --> V[Readiness + regression green, meaningful AT red twice]
+    V --> H[Human validates actual changes and evidence]
+    H --> L[Existing layer TDD cycles]
+    L --> F[Slice acceptance green]
+```
+
+The four acceptance responsibilities (scenario, domain DSL, protocol driver and
+real system) are separate from architectural implementation layers. Approved
+persistence representations may be built early to establish preconditions;
+feature business logic remains layer work. The approved test and its support are
+protected together. See the [user guide](docs/guide.md#slice-acceptance-preparation)
+for commands, evidence and recovery, and the [design handoff](docs/handoffs/2026-11-02-slice-acceptance-before-layers.md)
+for the original philosophy and agreed boundaries.
 
 ## Install and update
 

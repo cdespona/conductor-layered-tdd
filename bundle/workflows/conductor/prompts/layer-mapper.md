@@ -99,3 +99,8 @@ Return structured output:
 - `layer_count`: number of layers
 - `recommended_next_layer`: layer id or todo filename
 - `summary`: short layer map summary
+
+Read the active `02-slice-acceptance.json`. Account explicitly for support and
+approved persistence/model decisions already implemented before layers; assign
+only remaining internal work. Keep its protected files outside writable layer
+boundaries. Corrections require human acceptance reapproval.

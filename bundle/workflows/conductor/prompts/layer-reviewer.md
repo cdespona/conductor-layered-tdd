@@ -22,7 +22,7 @@ Verification summary:
 
 | Check | Command | Exit | Duration ms | Passed | Failed | Output bytes | Truncated | Complete evidence |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| Tests | `{{ workflow.input.test_command }}` | {{ verification_tests.output.exit_code }} | {{ verification_tests.output.duration_ms }} | {{ verification_tests.output.passed_count }} | {{ verification_tests.output.failed_count }} | {{ verification_tests.output.output_bytes }} | {{ verification_tests.output.summary_truncated }} | `{{ verification_tests.output.evidence_path }}` |
+| Tests | `{{ slice_acceptance_prepare.output.regression_command }}` | {{ verification_tests.output.exit_code }} | {{ verification_tests.output.duration_ms }} | {{ verification_tests.output.passed_count }} | {{ verification_tests.output.failed_count }} | {{ verification_tests.output.output_bytes }} | {{ verification_tests.output.summary_truncated }} | `{{ verification_tests.output.evidence_path }}` |
 | Lint | `{{ workflow.input.lint_command }}` | {{ verification_lint.output.exit_code }} | {{ verification_lint.output.duration_ms }} | {{ verification_lint.output.passed_count }} | {{ verification_lint.output.failed_count }} | {{ verification_lint.output.output_bytes }} | {{ verification_lint.output.summary_truncated }} | `{{ verification_lint.output.evidence_path }}` |
 | Security | `{{ workflow.input.security_command }}` | {{ verification_security.output.exit_code }} | {{ verification_security.output.duration_ms }} | {{ verification_security.output.passed_count }} | {{ verification_security.output.failed_count }} | {{ verification_security.output.output_bytes }} | {{ verification_security.output.summary_truncated }} | `{{ verification_security.output.evidence_path }}` |
 

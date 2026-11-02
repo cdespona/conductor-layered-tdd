@@ -566,6 +566,17 @@ Given a pending order, when it is cancelled, then its state is cancelled.
         self.assertNotIn("DO NOT REPLAY DECISION HISTORY", result["layer_contract"])
         self.assertLessEqual(result["source_context_bytes"], 10_000)
 
+    def test_acceptance_support_is_read_only_in_implementation_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            root = Path(directory)
+            layer_map, todo = self.create_project(root)
+            (layer_map.parent / "02-slice-acceptance.json").write_text(json.dumps({
+                "protected_files": ["internal/orders/order.go"],
+            }), encoding="utf-8")
+            result = layer_context.build("implementor", layer_map, todo)
+            self.assertIn("internal/orders/order.go", result["read_only_paths"])
+            self.assertNotIn("internal/orders/order.go", result["allowed_paths"])
+
 
 class TestAuthorRecorderTests(unittest.TestCase):
     def todo(self, root: Path) -> Path:
@@ -686,6 +697,8 @@ red_gate_state: not-run-human-approved
         self.assertTrue(result["checkpoint_required"])
         self.assertFalse(result["proceed"])
         self.assertEqual(result["changed_files"], [])
+
+
 
 
 class LayerWorkKindRoutingTests(unittest.TestCase):

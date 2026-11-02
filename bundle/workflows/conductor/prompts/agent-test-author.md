@@ -41,7 +41,7 @@ Hard rules:
 - Author or modify only the top-level test(s) explicitly approved by the Gherkin and Test-Author Boundary.
 - Do not edit the todo, layer map, context manifest, production code, generated
   artifacts, or unrelated tests. Artifact state transitions belong to scripts.
-- Do not run a targeted test command. Conductor runs the configured full suite
+- Do not run a targeted test command. Conductor runs the approved full regression
   immediately after this agent and records the deterministic red-gate evidence.
 - The prompt already contains the authoritative contract and source projection.
   On the normal path, do not reopen the manifest, todo, layer map, production

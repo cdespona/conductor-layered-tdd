@@ -25,6 +25,7 @@ workflow:
     - "This workflow is self-contained. Use the installed workflow prompts and any repo-local Conductor skills under `.github/skills/conductor-*/`; do not require LTDD documentation files to exist in the target repository."
     - "Before code-changing agent work, check whether a relevant `.github/skills/conductor-<skill>/SKILL.md` exists and follow it when applicable. A bounded context field that explicitly lists matching skill paths satisfies the existence check; do not search again when that list is present."
     - "If the Copilot CLI caveman skill is available, use caveman for planning notes, checkpoints, summaries, and human gate text. Keep artifact schemas, commands, paths, errors, and verification results exact and readable."
+    - "For standard slices, the human-approved 02-slice-acceptance.json is the outer behavior contract. Its scenario and protected_files (tests, DSL, drivers, fixtures, approved persistence representations) remain read-only during layers. Checkpoint for human acceptance reapproval when they need changes, even if a layer boundary permits the file. Account for setup already built before layers. Layer regression excludes only the named pending outer AT; every other failure remains blocking and final slice acceptance must be green."
     - "When graphify-out/graph.json exists, use Graphify only for bounded repository-navigation questions before opening returned source locations. Do not rebuild or update the graph from an agent prompt."
   limits:
     max_iterations: 120
@@ -41,7 +42,7 @@ workflow:
       type: string
       required: false
       default: make test
-      description: Command run before analysis and after implementation.
+      description: Initial full suite; basis for the human-approved layer regression command.
     lint_command:
       type: string
       required: false
@@ -577,7 +578,7 @@ agents:
       - label: Requirements are confirmed for one selected slice.
         value: approve
         prompt_for: feedback
-        route: layer_mapper
+        route: slice_acceptance_planner
       - label: I edited or commented on requirements; revise this same artifact.
         value: revise
         prompt_for: feedback
@@ -600,7 +601,7 @@ agents:
       - label: Requirements are confirmed for this same slice.
         value: approve
         prompt_for: feedback
-        route: layer_mapper
+        route: slice_acceptance_planner
       - label: I edited or commented on requirements; revise this same artifact again.
         value: revise
         prompt_for: feedback
@@ -626,7 +627,7 @@ agents:
       - label: Requirements are confirmed for this selected slice.
         value: approve
         prompt_for: feedback
-        route: layer_mapper
+        route: slice_acceptance_planner
       - label: I edited or commented on requirements; revise this same artifact.
         value: revise
         prompt_for: feedback
@@ -671,7 +672,7 @@ agents:
       - label: Requirements are confirmed for this same selected slice.
         value: approve
         prompt_for: feedback
-        route: layer_mapper
+        route: slice_acceptance_planner
       - label: I edited or commented on requirements; revise this same artifact again.
         value: revise
         prompt_for: feedback
@@ -680,12 +681,261 @@ agents:
         value: stop
         route: stopped
 
+  - name: slice_acceptance_planner
+    description: Resolve slice acceptance design and missing support with the human before layers.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - requirements_griller.output.artifact_path
+      - slice_run_starter.output.artifact_path?
+      - workflow.input.test_command
+      - slice_acceptance_design_gate.output?
+      - slice_acceptance_validation_gate.output?
+      - slice_acceptance_blocked_gate.output?
+      - slice_acceptance_final_gate.output?
+    prompt: !file prompts/slice-acceptance-planner.md
+    output:
+      artifact_path:
+        type: string
+        description: Exact active slice 02-slice-acceptance.json path.
+      summary:
+        type: string
+        description: Design decisions, unresolved questions and proposed support scope.
+    routes:
+      - to: slice_acceptance_design_gate
+
+  - name: slice_acceptance_design_gate
+    type: human_gate
+    prompt: |
+      Review the slice Gherkin, real-system boundary, missing support, data model,
+      commands, determinism controls and exact permitted support files.
+      Resolve every modeling/architectural question before approval. Approve
+      preservation mode only for work that introduces no observable behavior.
+      Plan: `{{ slice_acceptance_planner.output.artifact_path }}`
+      Summary: {{ slice_acceptance_planner.output.summary }}
+    options:
+      - label: Approve this concrete design and support scope; build it.
+        value: approve
+        route: slice_acceptance_prepare
+      - label: Resolve questions or revise the acceptance design.
+        value: revise
+        prompt_for: feedback
+        route: slice_acceptance_planner
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: slice_acceptance_prepare
+    type: script
+    description: Freeze the approved acceptance plan and snapshot all existing work.
+    input:
+      - slice_acceptance_planner.output.artifact_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/slice-acceptance.py
+      - prepare
+      - "{{ slice_acceptance_planner.output.artifact_path }}"
+    routes:
+      - to: slice_acceptance_builder
+        when: "{{ output.proceed }}"
+      - to: slice_acceptance_blocked_gate
+
+  - name: slice_acceptance_builder
+    description: Build functional black-box acceptance and explicitly approved persistence/setup support.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - slice_acceptance_planner.output.artifact_path
+    prompt: !file prompts/slice-acceptance-builder.md
+    output:
+      summary:
+        type: string
+        description: Actual support changes and any unresolved blockers.
+    routes:
+      - to: slice_acceptance_verify
+
+  - name: slice_acceptance_verify
+    type: script
+    description: Check exact support scope, harness readiness, green regression and repeatable expected red.
+    input:
+      - slice_acceptance_prepare.output.state_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/slice-acceptance.py
+      - verify
+      - "{{ slice_acceptance_prepare.output.state_path }}"
+    timeout: 600
+    routes:
+      - to: slice_acceptance_validation_gate
+        when: "{{ output.proceed }}"
+      - to: slice_acceptance_blocked_gate
+
+  - name: slice_acceptance_validation_gate
+    type: human_gate
+    prompt: |
+      Review the actual test, DSL, drivers, fixtures and approved persistence changes.
+      Inspect full evidence: readiness must pass; regression excludes only the
+      named outer AT; both acceptance runs must fail for missing product behavior.
+      Compilation errors, missing drivers, fabricated outcomes or environment
+      failures are blockers. Validate the real boundary and setup semantics.
+      Plan: `{{ slice_acceptance_planner.output.artifact_path }}`
+      Changed files: {{ slice_acceptance_verify.output.changed_files }}
+      Full support patch: `{{ slice_acceptance_verify.output.patch_path }}`
+      Evidence: {{ slice_acceptance_verify.output.evidence }}
+      Summary: {{ slice_acceptance_verify.output.summary }}
+    options:
+      - label: Validate the built acceptance contract and evidence; start layers.
+        value: approve
+        route: slice_acceptance_approve
+      - label: Revise design or support before starting layers.
+        value: revise
+        prompt_for: feedback
+        route: slice_acceptance_planner
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: slice_acceptance_approve
+    type: script
+    description: Record human validation only if the verified acceptance contract is unchanged.
+    input:
+      - slice_acceptance_prepare.output.state_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/slice-acceptance.py
+      - approve
+      - "{{ slice_acceptance_prepare.output.state_path }}"
+    routes:
+      - to: layer_mapper
+        when: "{{ output.proceed }}"
+      - to: slice_acceptance_blocked_gate
+
+  - name: slice_acceptance_blocked_gate
+    type: human_gate
+    prompt: |
+      Acceptance preparation, contract protection or final verification is blocked.
+      Inspect the latest failing step output and evidence; do not waive a broken
+      harness, scope violation, changed contract, regression or failed final AT.
+      Plan: `{{ slice_acceptance_planner.output.artifact_path }}`
+      {% for step in [slice_acceptance_prepare, slice_acceptance_verify, slice_acceptance_approve, acceptance_guard_layer_snapshot, acceptance_guard_cleanup_layer_snapshot, acceptance_guard_layer_reviewer, acceptance_guard_cleanup_reviewer, slice_acceptance_final] if step is defined and step.output is defined and step.output.proceed is defined and not step.output.proceed %}
+      Failure: {{ step.output.summary }}
+      {% if step.output.evidence is defined %}Evidence: {{ step.output.evidence }}{% endif %}
+      {% endfor %}
+    options:
+      - label: Revise acceptance design/support through human approval again.
+        value: revise_acceptance
+        prompt_for: feedback
+        route: slice_acceptance_planner
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: slice_acceptance_final_gate
+    type: human_gate
+    prompt: |
+      Final slice acceptance is blocked. Inspect the evidence and choose product
+      repair through layer gates, or reapprove any necessary contract correction.
+      Failure: {{ slice_acceptance_final.output.summary }}
+      {% if slice_acceptance_final.output.evidence is defined %}
+      Evidence: {{ slice_acceptance_final.output.evidence }}
+      {% endif %}
+    options:
+      - label: Fix product behavior through the existing layer gates.
+        value: fix_layer
+        route: layer_selection_gate
+      - label: Revise the acceptance contract with human approval.
+        value: revise_acceptance
+        prompt_for: feedback
+        route: slice_acceptance_planner
+      - label: Stop this slice.
+        value: stop
+        route: stopped
+
+  - name: acceptance_guard_cleanup_layer_snapshot
+    type: script
+    description: Protect approved slice acceptance before cleanup implementation.
+    input:
+      - slice_acceptance_prepare.output.state_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/slice-acceptance.py
+      - check
+      - "{{ slice_acceptance_prepare.output.state_path }}"
+    routes:
+      - to: cleanup_layer_snapshot
+        when: "{{ output.proceed }}"
+      - to: slice_acceptance_blocked_gate
+
+  - name: slice_acceptance_final
+    type: script
+    description: Require unchanged approved support and green real slice acceptance before final review.
+    input:
+      - slice_acceptance_prepare.output.state_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/slice-acceptance.py
+      - final
+      - "{{ slice_acceptance_prepare.output.state_path }}"
+    timeout: 600
+    routes:
+      - to: final_reviewer
+        when: "{{ output.proceed }}"
+      - to: slice_acceptance_final_gate
+
+  - name: acceptance_guard_layer_snapshot
+    type: script
+    description: Block unreviewed changes to the approved slice acceptance contract.
+    input:
+      - slice_acceptance_prepare.output.state_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/slice-acceptance.py
+      - check
+      - "{{ slice_acceptance_prepare.output.state_path }}"
+    routes:
+      - to: layer_snapshot
+        when: "{{ output.proceed }}"
+      - to: slice_acceptance_blocked_gate
+
+  - name: acceptance_guard_layer_reviewer
+    type: script
+    description: Block unreviewed changes to the approved slice acceptance contract.
+    input:
+      - slice_acceptance_prepare.output.state_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/slice-acceptance.py
+      - check
+      - "{{ slice_acceptance_prepare.output.state_path }}"
+    routes:
+      - to: layer_reviewer
+        when: "{{ output.proceed }}"
+      - to: slice_acceptance_blocked_gate
+
+  - name: acceptance_guard_cleanup_reviewer
+    type: script
+    description: Block unreviewed changes to the approved slice acceptance contract.
+    input:
+      - slice_acceptance_prepare.output.state_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/slice-acceptance.py
+      - check
+      - "{{ slice_acceptance_prepare.output.state_path }}"
+    routes:
+      - to: cleanup_reviewer
+        when: "{{ output.proceed }}"
+      - to: slice_acceptance_blocked_gate
+
   - name: layer_mapper
     description: Map real repository boundaries and skeleton layer todos.
     model: gpt-6-sol
     reasoning:
       effort: high
     input:
+      - slice_acceptance_planner.output.artifact_path
       - requirements_griller.output.artifact_path
       - slice_run_starter.output.artifact_path?
       - graphify_status.output.graph_available?
@@ -713,6 +963,7 @@ agents:
     reasoning:
       effort: high
     input:
+      - slice_acceptance_planner.output.artifact_path
       - layer_mapper.output.artifact_path
     prompt: !file prompts/layer-map-reviser.md
     output:
@@ -1038,13 +1289,15 @@ agents:
   - name: cleanup_baseline_tests
     type: script
     description: Confirm the behavior suite is green immediately before cleanup.
+    input:
+      - slice_acceptance_prepare.output.regression_command
     command: python3
     args:
       - workflows/conductor/scripts/run-verification.py
       - --kind
       - cleanup-baseline-tests
       - --command
-      - "{{ workflow.input.test_command }}"
+      - "{{ slice_acceptance_prepare.output.regression_command }}"
     timeout: 600
     routes:
       - to: cleanup_baseline_lint
@@ -1121,7 +1374,7 @@ agents:
       - --request
       - "{{ workflow.input.request }}"
     routes:
-      - to: cleanup_layer_snapshot
+      - to: acceptance_guard_cleanup_layer_snapshot
 
   - name: cleanup_layer_snapshot
     type: script
@@ -1196,13 +1449,15 @@ agents:
   - name: cleanup_verification_tests
     type: script
     description: Run behavior tests after cleanup and retain complete evidence by path.
+    input:
+      - slice_acceptance_prepare.output.regression_command
     command: python3
     args:
       - workflows/conductor/scripts/run-verification.py
       - --kind
       - cleanup-verification-tests
       - --command
-      - "{{ workflow.input.test_command }}"
+      - "{{ slice_acceptance_prepare.output.regression_command }}"
     timeout: 600
     routes:
       - to: cleanup_verification_lint
@@ -1262,7 +1517,7 @@ agents:
       - --todo
       - "{{ cleanup_implementation_context.output.todo_path }}"
     routes:
-      - to: cleanup_reviewer
+      - to: acceptance_guard_cleanup_reviewer
 
   - name: cleanup_reviewer
     description: Review one completed cleanup layer without inventing absence tests.
@@ -1337,7 +1592,7 @@ agents:
       - label: Approve this cleanup and run final slice review.
         value: approve_final_review
         prompt_for: feedback
-        route: final_reviewer
+        route: slice_acceptance_final
       - label: Send this cleanup back for focused removal fixes.
         value: request_fixes
         prompt_for: feedback
@@ -1391,7 +1646,7 @@ agents:
       - selected_layer_context.output.request_contract
       - selected_layer_context.output.request_contract_truncated
       - selected_layer_context.output.source_fingerprint
-      - workflow.input.test_command
+      - slice_acceptance_prepare.output.regression_command
       - graphify_status.output.graph_available?
       - graphify_refresh.output.graph_available?
     prompt: !file prompts/layer-todo-generator.md
@@ -1458,8 +1713,8 @@ agents:
     type: human_gate
     prompt: |
       Review the selected layer todo, including `layer_size`. Approve the Gherkin and test ownership.
-      The workflow then runs the configured full test suite as the deterministic
-      red-test check before production implementation.
+      The workflow then runs the approved regression suite as the deterministic
+      red-test check before production implementation; only the named outer AT is excluded.
 
       Selected layer: `{{ layer_todo_generator.output.selected_layer }}`
       Layer todo artifact: `{{ layer_todo_generator.output.artifact_path }}`
@@ -1687,14 +1942,16 @@ agents:
 
   - name: red_suite_verifier
     type: script
-    description: Run the configured full suite and emit bounded expected-red evidence without failing the workflow.
+    description: Run approved layer regression and emit bounded expected-red evidence without failing the workflow.
+    input:
+      - slice_acceptance_prepare.output.regression_command
     command: python3
     args:
       - workflows/conductor/scripts/run-verification.py
       - --kind
       - red-suite
       - --command
-      - "{{ workflow.input.test_command }}"
+      - "{{ slice_acceptance_prepare.output.regression_command }}"
     timeout: 600
     routes:
       - to: red_suite_evidence_recorder
@@ -1708,7 +1965,7 @@ agents:
       - red_suite_verifier.output.exit_code
       - red_suite_verifier.output.output_bytes
       - red_suite_verifier.output.bounded_excerpt
-      - workflow.input.test_command
+      - slice_acceptance_prepare.output.regression_command
     command: python3
     args:
       - workflows/conductor/scripts/record-red-gate.py
@@ -1716,7 +1973,7 @@ agents:
       - --artifact
       - "{{ layer_todo_generator.output.artifact_path }}"
       - --command
-      - "{{ workflow.input.test_command }}"
+      - "{{ slice_acceptance_prepare.output.regression_command }}"
       - --exit-code
       - "{{ red_suite_verifier.output.exit_code }}"
       - --evidence-path
@@ -1736,7 +1993,7 @@ agents:
       automatically; do not edit frontmatter or a dashboard by hand.
 
       Active layer todo: `{{ layer_todo_generator.output.artifact_path }}`
-      Full-suite command: `{{ workflow.input.test_command }}`
+      Regression command: `{{ slice_acceptance_prepare.output.regression_command }}`
       Exit code: {{ red_suite_verifier.output.exit_code }}
       Evidence: `{{ red_suite_verifier.output.evidence_path }}`
       Summary: {{ red_suite_evidence_recorder.output.summary }}
@@ -1769,7 +2026,7 @@ agents:
       - red_suite_verifier.output.exit_code
       - red_suite_evidence_gate.output.selected
       - red_suite_evidence_gate.output.additional_input.feedback?
-      - workflow.input.test_command
+      - slice_acceptance_prepare.output.regression_command
     command: python3
     args:
       - workflows/conductor/scripts/record-red-gate.py
@@ -1781,7 +2038,7 @@ agents:
       - --feedback
       - '{{ red_suite_evidence_gate.output.additional_input.feedback | default("") }}'
       - --command
-      - "{{ workflow.input.test_command }}"
+      - "{{ slice_acceptance_prepare.output.regression_command }}"
       - --exit-code
       - "{{ red_suite_verifier.output.exit_code }}"
       - --evidence-path
@@ -1828,7 +2085,7 @@ agents:
       - --request
       - "{{ workflow.input.request }}"
     routes:
-      - to: layer_snapshot
+      - to: acceptance_guard_layer_snapshot
 
   - name: implementor
     description: Implement only inside the approved layer boundary.
@@ -1914,13 +2171,15 @@ agents:
   - name: verification_tests
     type: script
     description: Run the configured test command and retain complete evidence outside the reviewer prompt.
+    input:
+      - slice_acceptance_prepare.output.regression_command
     command: python3
     args:
       - workflows/conductor/scripts/run-verification.py
       - --kind
       - verification-tests
       - --command
-      - "{{ workflow.input.test_command }}"
+      - "{{ slice_acceptance_prepare.output.regression_command }}"
     timeout: 600
     routes:
       - to: verification_lint
@@ -1967,7 +2226,7 @@ agents:
       - --todo
       - "{{ layer_todo_generator.output.artifact_path }}"
     routes:
-      - to: layer_reviewer
+      - to: acceptance_guard_layer_reviewer
 
   - name: layer_reviewer
     description: Review one completed layer and record risks or gaps.
@@ -2014,7 +2273,7 @@ agents:
       - layer_diff.output.forbidden_paths
       - layer_diff.output.boundary_exempt_paths
       - implementation_context.output.request_contract
-      - workflow.input.test_command
+      - slice_acceptance_prepare.output.regression_command
       - workflow.input.lint_command
       - workflow.input.security_command
       - graphify_status.output.graph_available?
@@ -2062,7 +2321,7 @@ agents:
       - label: Approve this layer and run final slice review.
         value: approve_final_review
         prompt_for: feedback
-        route: final_reviewer
+        route: slice_acceptance_final
       - label: Send the layer back to the implementor for focused fixes.
         value: request_fixes
         prompt_for: feedback
@@ -2077,6 +2336,8 @@ agents:
     reasoning:
       effort: high
     input:
+      - slice_acceptance_final.output
+      - slice_acceptance_planner.output.artifact_path
       - layer_mapper.output.artifact_path
     prompt: !file prompts/final-reviewer.md
     output:
@@ -2121,7 +2382,7 @@ agents:
       - label: Revise the final review first.
         value: revise_review
         prompt_for: feedback
-        route: final_reviewer
+        route: slice_acceptance_final
 
   - name: memory_capturer
     description: Persist human-approved memory candidates from the final review.

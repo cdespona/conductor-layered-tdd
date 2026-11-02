@@ -34,44 +34,90 @@ flowchart LR
     T -->|"small, no tests needed"| FI["Bounded implementation"]
     FI --> FV["Test, lint, audit"] --> FR["Review and approval"]
     T -->|"standard or uncertain"| R["Requirements"]
-    R --> M["Layer map"]
+    R --> AD["Acceptance design + human gate"]
+    AD --> AB["Build AT and support"]
+    AB --> AV["Verify readiness, regression and expected red"]
+    AV --> AH["Human validates actual acceptance"]
+    AH --> M["Layer map"]
     M --> LT["Layer todo and Gherkin"]
-    LT --> S["Run full test suite"]
+    LT --> S["Run approved layer regression"]
     S --> ReviewGate{"Human reviews evidence"}
     ReviewGate -->|"approved"| I["Implementation"]
     ReviewGate -->|"revise"| LT
     I --> V["Test, lint, audit"]
-    V --> F["Layer and final review"]
+    V --> F["Layer review"]
+    F --> AF["Final slice acceptance green"]
+    AF --> RF["Final review"]
 ```
 
 | You do | The workflow does |
 | --- | --- |
 | Approve, revise, select, stop, or add a concise comment. | Routes to the right task and records the decision. |
 | Edit Markdown only to change scope, Gherkin, evidence, or another semantic contract. | Updates frontmatter as compact recovery context for later agents. |
-| Review the full-suite result before production code begins. | Runs the same configured `test_command` for preflight, red-gate evidence, and final verification. |
+| Review the full-suite result before production code begins. | Runs `test_command` at preflight; the approved regression command during layers and complete slice acceptance at completion. |
+
+## Slice acceptance preparation
+
+| Step | Human checks | Required evidence |
+| --- | --- | --- |
+| Design | Gherkin, real boundary, model/schema choices, support files, missing pieces and unknowns | `02-slice-acceptance.json`; all questions resolved |
+| Design approval | Exact writable files and protected scenario/DSL/driver/fixture files; setup cannot manufacture the outcome | Explicit Conductor decision before support authoring |
+| Build and verify | Harness compiles/loads and its data/environment work; unrelated regression stays green | Green readiness/regression plus two runs with the approved behavioral failure |
+| Actual validation | Review the real diff, setup semantics and full logs, not only unchanged Gherkin | Explicit Conductor decision before layer mapping |
+| Layers | Preserve the approved contract and support; account for models/setup already built | Hash guards plus normal layer gates |
+| Finish | Complete behavior works through the real boundary | Green readiness, regression and slice acceptance |
+
+The planner writes the concrete JSON schema described in the installed
+`prompts/slice-acceptance-planner.md`. It includes exact file scopes, design and
+determinism decisions, a readiness command, a regression command and a focused
+acceptance command with its expected assertion marker/exit code. Commands must
+exercise the real application boundary; a printed marker or compilation error is
+not behavior evidence. These semantics are validated by the human against full
+logs; exit codes and markers alone cannot prove them.
+
+The builder may create approved persistence models/schema and precondition
+inserts before layers. It cannot implement feature business logic or insert the
+expected outcome. Ordinary helpers suffice for the DSL. If the real entry cannot
+be exercised without more support, resolve its design before approval; an
+undefined helper or unavailable environment blocks progression.
+
+`preservation` mode requires explicit human approval and a justification that no
+observable behavior changes (for example a cleanup-only slice); readiness and
+regression must still pass. It is not a waiver for an unfinished behavior test.
+The fast route remains restricted to work needing no new/changed tests and no
+behavior, API, data or migration decisions.
+
+The approval snapshot and full verification logs are local temporary files linked
+from Conductor outputs. Keep them for checkpoint recovery. If they disappear,
+return through acceptance design and actual validation; approval cannot be
+reconstructed from a plan alone. A fresh run with `resume_path` redoes preparation.
+The blocked gate never silently reverts changes: review any scope violation and
+preserve existing user work before approving a revised baseline. Final failures
+can return to layer selection for product fixes. Contract corrections always go
+through acceptance design and actual validation again.
 
 ## The red-test gate
 
-The workflow intentionally uses the repository's full test command, not a framework-specific targeted command.
+The layer gate uses the approved regression command: the complete regression suite with only the explicitly pending outer slice acceptance scenarios excluded. The outer acceptance command runs separately; every other failure remains a blocker.
 
 ```mermaid
 flowchart LR
     A["Approve Gherkin"] --> B["Author or select top-level test"]
-    B --> C["Run test_command"]
+    B --> C["Run approved regression command"]
     C -->|"non-zero"| D["Confirm expected red"]
     C -->|"zero"| E["Accept existing coverage or revise"]
     D --> F["Implement"]
     E --> F
 ```
 
-The default is `make test`. A non-zero result is captured as evidence rather than aborting the workflow. You still decide whether that failure is the expected contract failure. A zero result can be accepted only as existing coverage; otherwise revise the todo.
+The preflight default is `make test`; acceptance design explicitly approves the later regression command. A non-zero result is captured as evidence rather than aborting the workflow. You still decide whether that failure is the expected contract failure. A zero result can be accepted only as existing coverage; otherwise revise the todo.
 
 ## Configuration
 
 | Input | Default | Use |
 | --- | --- | --- |
 | `request` | required | Code-changing task for one slice. |
-| `test_command` | `make test` | Full suite: preflight, red evidence, and post-implementation verification. |
+| `test_command` | `make test` | Full suite at preflight; basis for the human-approved layer regression command. |
 | `lint_command` | `make lint` | Static checks before and after implementation. |
 | `security_command` | `make audit` | Dependency/CVE checks before and after implementation. |
 | `graphify_scope` | repository root on first build; saved scan root on refresh | Optional code directory to narrow a human-approved Graphify build or refresh. |
@@ -133,7 +179,8 @@ Artifacts live under `.github/plans/` and are local working files. Their frontma
 | --- | --- |
 | `slice-selection.md` | choose one independently valuable slice. |
 | `00-requirements.md` | confirm scope, blockers, and non-goals. |
-| `01-layer-map.md` | choose the next implementation boundary. |
+| `02-slice-acceptance.json` | approve acceptance design, exact support scope, commands and determinism controls before layers. |
+| `01-layer-map.md` | choose the next implementation boundary after validating built acceptance. |
 | `layers/*.todo.md` | review Gherkin, test evidence, scope, risks, and decisions. |
 | `99-final-review.md` | approve completion and optional memory capture. |
 

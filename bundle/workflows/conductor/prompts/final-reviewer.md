@@ -59,3 +59,14 @@ Return structured output:
 - `residual_risks`: remaining risks or gaps
 - `ready_to_finish`: true if the slice is ready to finish
 - `summary`: final review summary
+
+Acceptance evidence:
+
+- Inspect `02-slice-acceptance.json` and the deterministic final result below.
+- Include mode, actual boundary, human approvals, command/results and full evidence
+  paths in the verification matrix. Preservation mode requires the explicit
+  no-new-behavior justification. Expected red is never sufficient for completion.
+- Review artifacts only; preserve product, tests, DSL, drivers, fixtures and the
+  approved acceptance plan unchanged.
+
+{{ slice_acceptance_final.output }}

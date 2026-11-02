@@ -11,7 +11,12 @@ flowchart TD
   C -- no --> F
 
   F --> G[Slice requirements confirmation<br/>Selected goal, out-of-scope slices,<br/>blockers, assumptions]
-  G --> H[Layer map<br/>Real repo boundaries,<br/>recommended order,<br/>skeleton layer todos]
+  G --> ATD[Slice acceptance design and unknowns]
+  ATD --> ATH[Human approves support scope]
+  ATH --> ATB[Build functional AT, DSL, drivers and setup]
+  ATB --> ATV[Readiness and regression green; meaningful AT red twice]
+  ATV --> ATA[Human validates actual support and evidence]
+  ATA --> H[Layer map<br/>Real repo boundaries,<br/>recommended order,<br/>skeleton layer todos]
   H --> I[Human selects next layer]
   I --> J[Layer todo<br/>Top-level Gherkin proposals,<br/>layer-level ownership,<br/>red-test gate]
 
@@ -45,7 +50,8 @@ flowchart TD
   X --> Y{More layers?}
 
   Y -- yes --> I
-  Y -- no --> Z[Slice final review<br/>All layers summary,<br/>end-to-end consistency,<br/>memory candidates]
+  Y -- no --> ATF[Require final slice acceptance green]
+  ATF --> Z[Slice final review<br/>All layers summary,<br/>end-to-end consistency,<br/>memory candidates]
 
   Z --> AA{Human approves<br/>memory capture?}
   AA -- yes --> AB[Existing memory skill/action<br/>captures approved memory]

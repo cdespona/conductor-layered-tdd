@@ -33,6 +33,8 @@ func TestClaudeInstallAndSyncKeepProvider(t *testing.T) {
 	}
 	workflow := filepath.Join(target, "workflows", "conductor", "layered-tdd.yaml")
 	assertContains(t, workflow, "name: claude-agent-sdk")
+	assertContains(t, workflow, "name: slice_acceptance_planner")
+	assertContains(t, workflow, "name: slice_acceptance_final")
 	assertContains(t, workflow, "auth_mode: subscription")
 	assertContains(t, workflow, "native_tools: claude_code")
 	assertContains(t, workflow, "model: claude-haiku-5-5")

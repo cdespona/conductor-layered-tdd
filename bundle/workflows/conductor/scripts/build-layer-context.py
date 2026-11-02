@@ -367,6 +367,14 @@ def build(
     elif consumer == "implementor":
         read_only = sorted(set(read_only + [path for path in allowed if is_test_path(path)]))
         allowed = [path for path in allowed if not is_test_path(path)]
+    acceptance_path = todo.parent.parent / "02-slice-acceptance.json"
+    if acceptance_path.is_file():
+        acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+        protected = acceptance.get("protected_files", [])
+        if not isinstance(protected, list) or not all(isinstance(path, str) for path in protected):
+            fail("acceptance protected_files must be an array of paths")
+        read_only = sorted(set(read_only + protected))
+        allowed = [path for path in allowed if path not in protected]
     if strict_permissions:
         boundary_conflicts = exact_boundary_conflicts(allowed, read_only)
         if boundary_conflicts:
