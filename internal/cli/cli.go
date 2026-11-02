@@ -42,6 +42,7 @@ func runInstall(args []string, mode installer.Mode, stdout, stderr io.Writer) er
 	flags.SetOutput(stderr)
 	target := flags.String("target", ".", "repository to install into")
 	memory := flags.Bool("memory-skills", false, "include Markdown memory skills")
+	provider := flags.String("provider", "", "copilot or claude-agent-sdk (defaults to copilot on first install)")
 	force := flags.Bool("force", false, "replace locally edited managed files")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -52,6 +53,7 @@ func runInstall(args []string, mode installer.Mode, stdout, stderr io.Writer) er
 	result, err := installer.Run(installer.Options{
 		Target:              *target,
 		Mode:                mode,
+		Provider:            installer.Provider(*provider),
 		IncludeMemorySkills: *memory,
 		Force:               *force,
 	})
@@ -116,8 +118,8 @@ func printUsage(output io.Writer) {
 	fmt.Fprintln(output, `ltdd installs and maintains the Conductor layered-TDD workflow.
 
 Usage:
-  ltdd install [--target PATH] [--memory-skills] [--force]
-  ltdd sync [--target PATH] [--memory-skills] [--force]
+  ltdd install [--target PATH] [--provider copilot|claude-agent-sdk] [--memory-skills] [--force]
+  ltdd sync [--target PATH] [--provider copilot|claude-agent-sdk] [--memory-skills] [--force]
   ltdd validate [--target PATH]
   ltdd version`)
 }

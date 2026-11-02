@@ -23,6 +23,69 @@ func TestInstallCopiesWorkflowAndCoreSkills(t *testing.T) {
 	}
 	assertContains(t, filepath.Join(target, ".gitignore"), ".ltdd/")
 	assertContains(t, manifestPath(target), "workflows/conductor/layered-tdd.yaml")
+	assertContains(t, manifestPath(target), `"provider": "copilot"`)
+}
+
+func TestClaudeInstallAndSyncKeepProvider(t *testing.T) {
+	target := t.TempDir()
+	if _, err := Run(Options{Target: target, Provider: ProviderClaude}); err != nil {
+		t.Fatal(err)
+	}
+	workflow := filepath.Join(target, "workflows", "conductor", "layered-tdd.yaml")
+	assertContains(t, workflow, "name: claude-agent-sdk")
+	assertContains(t, workflow, "auth_mode: subscription")
+	assertContains(t, workflow, "native_tools: claude_code")
+	assertContains(t, workflow, "model: claude-haiku-5-5")
+	assertContains(t, workflow, "model: claude-sonnet-5-5")
+	claudeData, err := os.ReadFile(workflow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(claudeData), "reasoning:") || strings.Contains(string(claudeData), "default_reasoning_effort:") {
+		t.Fatal("Claude Agent SDK variant must omit unsupported reasoning effort settings")
+	}
+	assertContains(t, manifestPath(target), `"provider": "claude-agent-sdk"`)
+	result, err := Run(Options{Target: target, Mode: ModeSync})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Updated) != 0 || len(result.Preserved) != 0 {
+		t.Fatalf("sync changed clean Claude install: %+v", result)
+	}
+	assertContains(t, workflow, "name: claude-agent-sdk")
+}
+
+func TestProviderChangeRequiresForce(t *testing.T) {
+	target := t.TempDir()
+	if _, err := Run(Options{Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(Options{Target: target, Mode: ModeSync, Provider: ProviderClaude}); err == nil || !strings.Contains(err.Error(), "requires --force") {
+		t.Fatalf("expected explicit replacement boundary, got %v", err)
+	}
+	assertContains(t, filepath.Join(target, "workflows", "conductor", "layered-tdd.yaml"), "provider: copilot")
+}
+
+func TestLegacyManifestKeepsCopilotProvider(t *testing.T) {
+	target := t.TempDir()
+	if _, err := Run(Options{Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := readManifest(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous.Provider = ""
+	if err := writeManifest(target, previous); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(Options{Target: target, Mode: ModeSync, Provider: ProviderClaude}); err == nil || !strings.Contains(err.Error(), "requires --force") {
+		t.Fatalf("expected legacy Copilot install to resist provider switch, got %v", err)
+	}
+	if _, err := Run(Options{Target: target, Mode: ModeSync}); err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, manifestPath(target), `"provider": "copilot"`)
 }
 
 func TestInstallCanIncludeAllMemorySkills(t *testing.T) {

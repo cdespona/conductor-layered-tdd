@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -15,6 +16,13 @@ import (
 )
 
 const manifestVersion = 1
+
+type Provider string
+
+const (
+	ProviderCopilot Provider = "copilot"
+	ProviderClaude  Provider = "claude-agent-sdk"
+)
 
 var coreSkills = []string{
 	"tdd",
@@ -40,6 +48,7 @@ const (
 type Options struct {
 	Target              string
 	Mode                Mode
+	Provider            Provider
 	IncludeMemorySkills bool
 	Force               bool
 }
@@ -52,8 +61,9 @@ type Result struct {
 }
 
 type manifest struct {
-	Version int               `json:"version"`
-	Files   map[string]string `json:"files"`
+	Version  int               `json:"version"`
+	Provider Provider          `json:"provider,omitempty"`
+	Files    map[string]string `json:"files"`
 }
 
 type bundledFile struct {
@@ -78,12 +88,28 @@ func Run(opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	files, err := bundledFiles(opts.IncludeMemorySkills)
+	if previous.Provider == "" && previous.Files["workflows/conductor/layered-tdd.yaml"] != "" {
+		previous.Provider = ProviderCopilot
+	}
+	provider := opts.Provider
+	if provider == "" {
+		provider = previous.Provider
+	}
+	if provider == "" {
+		provider = ProviderCopilot
+	}
+	if provider != ProviderCopilot && provider != ProviderClaude {
+		return Result{}, fmt.Errorf("unsupported provider %q (choose copilot or claude-agent-sdk)", provider)
+	}
+	if previous.Provider != "" && opts.Provider != "" && provider != previous.Provider && !opts.Force {
+		return Result{}, fmt.Errorf("provider change from %s to %s requires --force", previous.Provider, provider)
+	}
+	files, err := bundledFiles(opts.IncludeMemorySkills, provider)
 	if err != nil {
 		return Result{}, err
 	}
 
-	next := manifest{Version: manifestVersion, Files: map[string]string{}}
+	next := manifest{Version: manifestVersion, Provider: provider, Files: map[string]string{}}
 	result := Result{}
 	for _, file := range files {
 		destination := filepath.Join(target, filepath.FromSlash(file.Target))
@@ -127,7 +153,7 @@ func Run(opts Options) (Result, error) {
 	return result, nil
 }
 
-func bundledFiles(includeMemory bool) ([]bundledFile, error) {
+func bundledFiles(includeMemory bool, provider Provider) ([]bundledFile, error) {
 	skills := append([]string{}, coreSkills...)
 	if includeMemory {
 		skills = append(skills, memorySkills...)
@@ -164,6 +190,12 @@ func bundledFiles(includeMemory bool) ([]bundledFile, error) {
 		if err != nil {
 			return fmt.Errorf("read bundled file %q: %w", path, err)
 		}
+		if path == "workflows/conductor/layered-tdd.yaml" && provider == ProviderClaude {
+			data, err = claudeWorkflow(data)
+			if err != nil {
+				return err
+			}
+		}
 		files = append(files, bundledFile{Source: path, Target: target, Data: data})
 		return nil
 	})
@@ -172,6 +204,33 @@ func bundledFiles(includeMemory bool) ([]bundledFile, error) {
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Target < files[j].Target })
 	return files, nil
+}
+
+func claudeWorkflow(source []byte) ([]byte, error) {
+	value := string(source)
+	replacements := [][2]string{
+		{"    provider: copilot\n", "    provider:\n      name: claude-agent-sdk\n      auth_mode: subscription\n      native_tools: claude_code\n"},
+		{"default_model: gpt-6-sol", "default_model: claude-sonnet-5-5"},
+		{"model: gpt-6-sol", "model: claude-sonnet-5-5"},
+		{"model: gpt-6-luna", "model: claude-haiku-5-5"},
+		{"'gpt-6-luna'", "'claude-haiku-5-5'"},
+		{"'claude-sonnet-5.5'", "'claude-sonnet-5-5'"},
+		{"If the Copilot CLI caveman skill is available", "If a caveman skill is available"},
+	}
+	for _, replacement := range replacements {
+		if !strings.Contains(value, replacement[0]) {
+			return nil, fmt.Errorf("canonical workflow is missing provider template marker %q", replacement[0])
+		}
+		value = strings.ReplaceAll(value, replacement[0], replacement[1])
+	}
+	value = strings.Replace(value, "# This workflow assumes the Copilot provider and local repository tools are\n# available through Conductor/Copilot CLI.", "# This installed variant uses Claude Code through Conductor's Claude Agent SDK.\n# Sign in with `claude auth login` before running it.", 1)
+	value = strings.Replace(value, "    default_reasoning_effort: medium\n", "", 1)
+	effortBlocks := regexp.MustCompile(`(?m)^    reasoning:\n      effort: [^\n]+\n`)
+	if len(effortBlocks.FindAllString(value, -1)) != 18 {
+		return nil, fmt.Errorf("canonical workflow reasoning blocks changed; update Claude provider rendering")
+	}
+	value = effortBlocks.ReplaceAllString(value, "")
+	return []byte(value), nil
 }
 
 func resolveTarget(target string) (string, error) {

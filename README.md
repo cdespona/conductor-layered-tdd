@@ -48,6 +48,9 @@ ltdd install
 # Include Markdown memory skills.
 ltdd install --memory-skills
 
+# Use the Claude CLI subscription through Conductor's Claude Agent SDK.
+ltdd install --provider claude-agent-sdk
+
 # Target another repository.
 ltdd install --target /path/to/repository
 
@@ -55,7 +58,9 @@ ltdd install --target /path/to/repository
 ltdd sync
 ```
 
-The installer records hashes in `.ltdd/manifest.json`. `ltdd sync` updates only files that still match their last installed version. Divergent target files are reported as preserved. Use `--force` only when bundled content should intentionally replace local edits.
+The default provider is `copilot`. For Claude, install Claude Code and sign in with `claude auth login` before running the workflow. The Claude variant sets `auth_mode: subscription` so Conductor uses the CLI login instead of an API key. It enables Claude Code's native tools and omits Conductor reasoning-effort fields, which this provider does not accept. [Conductor's provider documentation](https://github.com/microsoft/conductor/blob/main/docs/providers/comparison.md) explains the `claude-agent-sdk` provider.
+
+The installer records the provider and file hashes in `.ltdd/manifest.json`. `ltdd sync` reuses the selected provider and updates only files that still match their last installed version. Divergent target files are reported as preserved. Changing providers or replacing local edits requires `--force`.
 
 ## Install the CLI
 
