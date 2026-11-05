@@ -10,7 +10,8 @@ those approved setup representations, never feature business logic or fabricated
 outcomes. Keep existing dirty work intact. Use existing helpers and dependencies.
 
 Run focused checks if useful. Conductor verifies the complete approved readiness,
-regression and acceptance commands after your work. The AT must actually execute
+regression and each named acceptance test after your work. Implement every
+listed test in its protected file and use the approved runner output. Each AT must actually execute
 and fail for missing business behavior; compilation failure, unavailable data,
 undefined helpers, fake drivers and broken infrastructure are blockers. If the
 approved design cannot achieve that, stop editing and report the concrete issue;

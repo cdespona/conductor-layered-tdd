@@ -60,21 +60,42 @@ def read_plan(path):
     if set(plan["allowed_files"]) & set(plan["forbidden_files"]):
         raise ValueError("allowed and forbidden files overlap")
     if plan["mode"] == "behavior":
-        for key in ("acceptance_command", "expected_failure_marker"):
-            if not isinstance(plan.get(key), str) or not plan[key].strip():
-                raise ValueError(f"missing behavior acceptance field: {key}")
-        if not plan["protected_files"]:
-            raise ValueError("behavior acceptance must protect its tests and support")
-        code = plan.get("expected_red_exit")
-        if type(code) is not int or not 1 <= code <= 125:
-            raise ValueError("expected_red_exit must identify an ordinary test failure")
-        if plan["acceptance_command"] == plan["regression_command"]:
-            raise ValueError("regression must explicitly exclude the pending slice acceptance")
+        expected_tests(plan)
     elif not isinstance(plan.get("not_applicable_reason"), str) or not plan["not_applicable_reason"].strip():
         raise ValueError("preservation requires an explicit no-new-behavior justification")
     if path.as_posix() in plan["allowed_files"]:
         raise ValueError("support author cannot edit the approved plan")
     return plan
+
+
+def expected_tests(plan):
+    tests = plan.get("acceptance_tests")
+    if not isinstance(tests, list) or not tests:
+        raise ValueError("declare acceptance_tests and reapprove the behavior acceptance design")
+    ids, commands = set(), set()
+    for test in tests:
+        if not isinstance(test, dict):
+            raise ValueError("each acceptance test must be an object")
+        for key in ("id", "scenario", "file", "command", "red_result_line",
+                    "green_result_line", "expected_failure_marker"):
+            value = test.get(key)
+            if not isinstance(value, str) or not value.strip() or value != value.strip() or "\n" in value or "\r" in value:
+                raise ValueError(f"acceptance test requires a nonempty single-line {key}")
+        if test["file"] not in plan["protected_files"]:
+            raise ValueError(f"expected acceptance test file must be protected: {test['file']}")
+        if test["id"] in ids or test["command"] in commands:
+            raise ValueError("acceptance test ids and focused commands must be unique")
+        ids.add(test["id"])
+        commands.add(test["command"])
+        if test["command"] == plan["regression_command"]:
+            raise ValueError("regression must explicitly exclude pending slice acceptance tests")
+        if (test["red_result_line"] == test["green_result_line"]
+                or any(test["id"] not in test[key] for key in ("red_result_line", "green_result_line"))):
+            raise ValueError("acceptance test result lines must identify the test and distinguish red from green")
+        code = test.get("expected_red_exit")
+        if type(code) is not int or not 1 <= code <= 125:
+            raise ValueError("expected_red_exit must identify an ordinary test failure")
+    return tests
 
 
 def save(path, state):
@@ -119,17 +140,18 @@ def run_checks(plan, final=False):
         if result["exit_code"] != 0:
             return False, evidence, f"{field} failed: harness/regression failure is not expected red"
     if plan["mode"] == "behavior":
-        for _ in range(1 if final else 2):
-            result = verification.run(plan["acceptance_command"], "slice-acceptance", 2048)
-            evidence.append(result)
-            log = Path(result["evidence_path"]).read_text()
-            if final:
-                passed = result["exit_code"] == 0
-            else:
-                passed = (result["exit_code"] == plan["expected_red_exit"]
-                          and plan["expected_failure_marker"] in log)
-            if not passed:
-                return False, evidence, "acceptance did not produce the approved " + ("green" if final else "behavioral red")
+        for test in expected_tests(plan):
+            for _ in range(1 if final else 2):
+                result = verification.run(test["command"], "slice-acceptance", 2048)
+                result.update(test_id=test["id"], scenario=test["scenario"], test_file=test["file"])
+                evidence.append(result)
+                log = Path(result["evidence_path"]).read_text()
+                expected_line = test["green_result_line" if final else "red_result_line"]
+                expected_exit = 0 if final else test["expected_red_exit"]
+                if (result["exit_code"] != expected_exit or expected_line not in log.splitlines()
+                        or (not final and test["expected_failure_marker"] not in log)):
+                    phase = "green" if final else "behavioral red"
+                    return False, evidence, f"acceptance test {test['id']} did not produce the approved {phase} evidence"
     return True, evidence, "Final acceptance is green." if final else "Support checks ready for human semantic validation."
 
 
@@ -138,6 +160,8 @@ def execute(action, state_path):
     if str(Path.cwd().resolve()) != state["repository_root"]:
         raise ValueError("acceptance state belongs to another repository")
     plan = state["plan"]
+    if plan["mode"] == "behavior":
+        expected_tests(plan)
     if action == "verify":
         if digest(state["plan_path"]) != state["plan_hash"]:
             raise ValueError("approved acceptance plan was modified during support authoring")

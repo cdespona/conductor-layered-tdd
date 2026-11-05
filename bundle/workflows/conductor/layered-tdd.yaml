@@ -709,7 +709,8 @@ agents:
     type: human_gate
     prompt: |
       Review the slice Gherkin, real-system boundary, missing support, data model,
-      commands, determinism controls and exact permitted support files.
+      commands, expected test IDs and scenario coverage, determinism controls and
+      exact permitted support files.
       Resolve every modeling/architectural question before approval. Approve
       preservation mode only for work that introduces no observable behavior.
       Plan: `{{ slice_acceptance_planner.output.artifact_path }}`
@@ -777,7 +778,8 @@ agents:
     prompt: |
       Review the actual test, DSL, drivers, fixtures and approved persistence changes.
       Inspect full evidence: readiness must pass; regression excludes only the
-      named outer AT; both acceptance runs must fail for missing product behavior.
+      named outer ATs. Each expected test ID must report two failures for missing
+      product behavior. Check that each test covers its approved scenario.
       Compilation errors, missing drivers, fabricated outcomes or environment
       failures are blockers. Validate the real boundary and setup semantics.
       Plan: `{{ slice_acceptance_planner.output.artifact_path }}`

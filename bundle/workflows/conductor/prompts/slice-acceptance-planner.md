@@ -43,10 +43,21 @@ JSON fields (all are required unless explicitly conditional):
 | `protected_files` | All scenario, test, DSL, driver and fixture/config files whose semantics require human review after approval, including existing support; include approved persistence representations where necessary |
 | `readiness_command` | Real command proving harness compiles/loads and environment, driver and fixtures are functional without requiring the missing behavior |
 | `regression_command` | Full regression including existing and future layer tests, excluding ONLY the explicitly named pending outer slice acceptance scenarios |
-| `acceptance_command` | Behavior mode: focused command running the complete approved slice acceptance scenarios against the real boundary |
-| `expected_red_exit` | Behavior mode: ordinary failing-test exit code (1..125) |
-| `expected_failure_marker` | Behavior mode: unique assertion/failing scenario evidence for missing behavior; never compilation/setup errors or a fabricated echo |
-| `not_applicable_reason` | Preservation mode: explicit justification that no observable behavior changes and existing preservation coverage suffices |
+| `acceptance_tests` | Behavior mode: nonempty array identifying every expected black-box test and its approved scenario |
+
+Each entry in `acceptance_tests` contains:
+
+| Field | Value |
+| --- | --- |
+| `id` | Unique, stable test identifier shown by the real runner in both results |
+| `scenario` | Single-line reference or description of the approved business scenario |
+| `file` | Exact test source path, included in `protected_files` |
+| `command` | Unique, focused command selecting this one test with verbose per-test results |
+| `red_result_line` / `green_result_line` | Exact single result lines emitted by the runner for this ID on failure and success; a suite summary, skipped test, or fabricated echo is insufficient |
+| `expected_red_exit` | Ordinary failing-test exit code (1..125) |
+| `expected_failure_marker` | Assertion evidence for this scenario's missing behavior; never a setup error |
+
+For preservation mode, provide `not_applicable_reason` with an explicit justification that no observable behavior changes and existing preservation coverage suffices.
 
 Keep commands transparent and reviewable. Never blanket-ignore suite failures or
 exclude unrelated tests. If readiness cannot be established without some model or

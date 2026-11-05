@@ -38,8 +38,13 @@ class SliceAcceptanceTests(unittest.TestCase):
             "protected_files": ["at.py", "order.json"], "forbidden_files": ["product.py"],
             "readiness_command": "python3 -c \"from pathlib import Path; import json; compile(Path('at.py').read_text(), 'at.py', 'exec'); assert json.loads(Path('order.json').read_text())['status'] == 'pending'\"",
             "regression_command": "python3 -c \"from pathlib import Path; compile(Path('product.py').read_text(), 'product.py', 'exec')\"",
-            "acceptance_command": "python3 at.py", "expected_red_exit": 1,
-            "expected_failure_marker": "order status should be cancelled",
+            "acceptance_tests": [{
+                "id": "test_cancel", "scenario": "Cancellation persists", "file": "at.py",
+                "command": "python3 -m unittest -v at.Acceptance.test_cancel",
+                "red_result_line": "at.Acceptance.test_cancel ... FAIL",
+                "green_result_line": "at.Acceptance.test_cancel ... ok",
+                "expected_red_exit": 1, "expected_failure_marker": "order status should be cancelled",
+            }],
         }
         self.write_plan()
 
@@ -58,10 +63,14 @@ class SliceAcceptanceTests(unittest.TestCase):
     def build(self):
         Path("order.json").write_text('{"status":"pending"}\n')
         Path("at.py").write_text(
-            "import json, subprocess, sys\n"
-            "assert json.load(open('order.json'))['status'] == 'pending'\n"
-            "observed = subprocess.check_output([sys.executable, 'product.py'], text=True).strip()\n"
-            "assert observed == 'cancelled', 'order status should be cancelled'\n"
+            "import json, subprocess, sys, unittest\n"
+            "from pathlib import Path\n"
+            "class Acceptance(unittest.TestCase):\n"
+            "    def __str__(self): return self.id()\n"
+            "    def test_cancel(self):\n"
+            "        self.assertEqual(json.loads(Path('order.json').read_text())['status'], 'pending')\n"
+            "        observed = subprocess.check_output([sys.executable, 'product.py'], text=True).strip()\n"
+            "        self.assertEqual(observed, 'cancelled', 'order status should be cancelled')\n"
         )
 
     def approve(self):
@@ -163,6 +172,41 @@ class SliceAcceptanceTests(unittest.TestCase):
         with patch.object(acceptance.verification, "run", side_effect=run):
             self.assertFalse(acceptance.execute("verify", self.state_path)["proceed"])
         self.assertEqual(calls, 4)
+
+    def test_missing_inventory_requires_design_reapproval(self):
+        self.plan.pop("acceptance_tests")
+        self.write_plan()
+        with self.assertRaisesRegex(ValueError, "declare acceptance_tests"):
+            self.prepare()
+
+    def test_every_declared_test_must_be_executed(self):
+        second = dict(self.plan["acceptance_tests"][0], id="test_read", scenario="Fresh status",
+                      command="python3 -m unittest -v at.Acceptance.test_read",
+                      red_result_line="at.Acceptance.test_read ... FAIL",
+                      green_result_line="at.Acceptance.test_read ... ok")
+        self.plan["acceptance_tests"].append(second)
+        self.write_plan()
+        self.prepare()
+        self.build()
+        result = acceptance.execute("verify", self.state_path)
+        self.assertFalse(result["proceed"])
+        self.assertIn("test_read", result["summary"])
+        self.assertEqual([entry["test_id"] for entry in result["evidence"][2:]],
+                         ["test_cancel", "test_cancel", "test_read"])
+
+    def test_success_without_the_expected_test_result_cannot_close(self):
+        self.approve()
+        real_run = acceptance.verification.run
+
+        def run(command, kind, limit):
+            if kind == "slice-acceptance":
+                command = "python3 -c 'pass'"
+            return real_run(command, kind, limit)
+
+        with patch.object(acceptance.verification, "run", side_effect=run):
+            result = acceptance.execute("final", self.state_path)
+        self.assertFalse(result["proceed"])
+        self.assertIn("test_cancel", result["summary"])
 
     def test_unchanged_gherkin_does_not_allow_changed_dsl(self):
         self.approve()

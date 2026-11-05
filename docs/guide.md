@@ -98,7 +98,7 @@ through acceptance design and actual validation again.
 
 ## The red-test gate
 
-The layer gate uses the approved regression command: the complete regression suite with only the explicitly pending outer slice acceptance scenarios excluded. The outer acceptance command runs separately; every other failure remains a blocker.
+The layer gate uses the approved regression command: the complete regression suite with only the explicitly pending outer slice acceptance scenarios excluded. Each expected outer acceptance test runs separately. The approved plan maps its ID and protected source file to a scenario, focused command, and exact runner result lines. Every listed test must report the expected behavioral failure twice before layers and pass at final verification. Existing behavior plans without this inventory require design reapproval. Every other failure remains a blocker.
 
 ```mermaid
 flowchart LR

@@ -22,6 +22,23 @@ python3 /absolute/path/to/benchmarks/layered-tdd/scripts/collect-results.py \
   --output /path/to/control.json
 ```
 
+## Deterministic Conductor Integration Test
+
+Run the integration test with the Python environment that provides
+`conductor-cli` (the interpreter in the installed `conductor` command's
+shebang for a standard uv tool installation):
+
+```sh
+<conductor-python> -m unittest discover -s benchmarks/layered-tdd/tests -p test_conductor_acceptance_integration.py -v
+```
+
+The test loads the canonical workflow in Conductor's engine and uses fixed
+responses for model calls and human choices. It exercises the real routing,
+gate prompts, and scripts against a disposable order fixture with persisted
+JSON state. It checks the order of the approval gates, the repeatable outer
+red before layers, and the successful final review after implementation.
+The standard test suite skips this test if its Python cannot import Conductor.
+
 ## Token-Efficient Benchmark Funnel
 
 Do not spend three complete runs on an unproven candidate. Promote a change
