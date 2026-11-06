@@ -24,6 +24,14 @@ _Avoid_: dispatcher, hub determinista
 Componente determinista que veta cualquier transición que rompa una garantía TDD, venga de quien venga.
 _Avoid_: validador, gatekeeper
 
+**Veto**:
+Rechazo del guard a una transición propuesta que incumple una invariante. Queda registrado en el ledger con la regla y los hechos que faltan.
+_Avoid_: bloqueo, rechazo
+
+**Invariante**:
+Garantía TDD que ninguna transición puede romper, la proponga quien la proponga. Se desbloquea solo produciendo el hecho que falta por su camino aprobado, nunca con un override.
+_Avoid_: regla, política
+
 **Tabla canónica**:
 Conjunto declarativo de transiciones `fase + condición sobre hechos → siguiente radio` que reproduce el camino feliz de ltdd.
 _Avoid_: reglas de routing, grafo
