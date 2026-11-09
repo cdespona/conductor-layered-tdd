@@ -8,6 +8,14 @@ Workflows de Conductor que guían un cambio de código mediante TDD por capas co
 Nodo central del flujo en estrella que propone el siguiente radio cuando la tabla canónica no basta.
 _Avoid_: orquestador, nodo central LLM
 
+**Objetivo**:
+Lo que el humano pidió trabajar en un run, antes de reducirlo a una slice.
+_Avoid_: request, tarea, target
+
+**Brief**:
+Instrucción concreta del hub al radio destino que explica por qué le llega el trabajo tras un escalado.
+_Avoid_: mensaje, hint
+
 **Radio**:
 Un paso de ltdd ejecutado como destino del flujo en estrella, que siempre devuelve el control al centro con un outcome.
 _Avoid_: spoke, nodo, rama
