@@ -17,8 +17,8 @@ Instrucción concreta del hub al radio destino que explica por qué le llega el 
 _Avoid_: mensaje, hint
 
 **Radio**:
-Un paso de ltdd ejecutado como destino del flujo en estrella, que siempre devuelve el control al centro con un outcome.
-_Avoid_: spoke, nodo, rama
+Unidad de decisión del flujo en estrella: un agente o una decisión humana junto con sus comprobaciones deterministas y su aprobación. Siempre devuelve el control al centro con un outcome.
+_Avoid_: spoke, nodo, rama, paso
 
 **Outcome**:
 Resultado cerrado con el que termina un radio: `done`, `blocked`, `needs-human` o `incoherence`.
