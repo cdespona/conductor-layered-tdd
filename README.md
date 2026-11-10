@@ -1,6 +1,6 @@
 # Conductor Layered TDD
 
-`ltdd` installs and safely updates a self-contained Microsoft Conductor workflow. Clearly bounded changes that need no new tests take a short implementation and review route; other requests prepare executable slice acceptance before layered TDD.
+`ltdd` installs, safely updates and runs two self-contained Microsoft Conductor workflows that share prompts and scripts: the linear `layered-tdd.yaml` and the star-shaped `layered-star.yaml`. Clearly bounded changes that need no new tests take a short implementation and review route; other requests prepare executable slice acceptance before layered TDD.
 
 ## Quick path
 
@@ -11,13 +11,32 @@ cd /path/to/your/repository
 ltdd install
 ltdd validate
 
-conductor run workflows/conductor/layered-tdd.yaml \
-  --workspace-instructions \
-  --web \
-  --input request="Describe the code-changing task"
+ltdd run "Describe the code-changing task"      # star flow (default)
+ltdd run --flow linear "Describe the task"      # linear ltdd flow
+ltdd resume                                      # resume the last run
 ```
 
-`ltdd` installs the workflow into the repository where it will run. Conductor itself remains a separate prerequisite.
+`ltdd run` wraps `conductor run <installed workflow> --web --workspace-instructions`.
+Without a request the star flow asks for the objective at its objective gate.
+`--unattended` adds `--skip-gates` and requires a request; an unattended star run
+that reaches a non-obvious jump stops with status needs-human and is resumed with
+`ltdd resume`. Test, lint and security commands, memory settings and
+`graphify_scope` can live in `.ltdd/config.json` (flag > config > workflow
+default; `--save` stores the flags passed). Arguments after `--` go to Conductor
+unchanged. `ltdd` installs the workflows into the repository where they run;
+Conductor itself remains a separate prerequisite.
+
+## Star flow
+
+`layered-star.yaml` keeps the same spokes (decision units of ltdd) but returns to
+a central `star_step` after each one. A deterministic router applies
+`star/canonical-table.json` and reproduces the ltdd happy path without model
+calls; a light hub agent only handles frontier cases (blocked or incoherent
+outcomes, free-text redirects, loops). A guard checks invariants I1-I10 before
+every spoke, whoever proposes it, and is the only writer of the hash-chained
+ledger `.github/plans/<slug>/star-state.json`. Non-obvious hub jumps go through a
+confirmation gate that lists the facts they would make stale. See
+[`GLOSSARY.md`](GLOSSARY.md) and ADR 0001 for the vocabulary and the decision.
 
 ## What is included
 
