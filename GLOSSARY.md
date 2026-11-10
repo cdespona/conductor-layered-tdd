@@ -52,6 +52,10 @@ _Avoid_: edge case, excepción
 Paso del router al hub ante un caso frontera.
 _Avoid_: fallback, derivación
 
+**Salto no obvio**:
+Propuesta del hub que requiere confirmación humana: cualquier cosa distinta de reintentar el mismo radio o avanzar al siguiente canónico con confianza suficiente.
+_Avoid_: salto raro, jump
+
 **Ledger**:
 Estado durable de un run en estrella, compuesto por un cursor de fase y un conjunto de hechos, escrito solo por componentes deterministas.
 _Avoid_: estado, contexto, checkpoint
