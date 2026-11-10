@@ -57,7 +57,11 @@ Classify every layer with exactly one routing value:
   its replacement is active, consumers are migrated, and existing behavior
   tests preserve the contract. Cleanup may appear at any dependency-valid point
   and may use any layer id; it is not tied to a final layer or naming pattern.
-
+{% for star in [star_step] if star is defined and star.output is defined %}- `work_kind: infrastructure` (star workflow only): configuration, build or
+  tooling work that does not fit the fast path and has no observable behavior a
+  test can pin. Human approval of the map exempts it from the red-test gate, so
+  use it only when no behavior test is meaningful.
+{% endfor %}
 Do not combine behavior and cleanup in one layer. Missing or ambiguous
 classification must be `behavior`. Public API, persisted data/schema, external
 event contracts, and cross-release retirement are behavior/migration work, not
@@ -104,3 +108,11 @@ Read the active `02-slice-acceptance.json`. Account explicitly for support and
 approved persistence/model decisions already implemented before layers; assign
 only remaining internal work. Keep its protected files outside writable layer
 boundaries. Corrections require human acceptance reapproval.
+
+{% for star in [star_step] if star is defined and star.output is defined %}
+## Star workflow
+
+{% if star.output.objective is defined and star.output.objective %}Objective: {{ star.output.objective }}
+{% endif %}{% if star.output.brief is defined and star.output.brief %}Brief from the hub for this visit (prioritize it over your default next step): {{ star.output.brief }}
+{% endif %}The star router chooses what runs next; do not assume a fixed next step. Also return the star return contract: `outcome` (`done`, `blocked`, `needs-human` or `incoherence`), `reason`, `artifacts` (repository-relative paths you created or changed) and `incoherence` as `{"claim": ..., "source": ..., "conflicts_with": ...}` when an approved contract, test or artifact contradicts the work, otherwise `{}`. Report an incoherence instead of editing a protected contract.
+{% endfor %}

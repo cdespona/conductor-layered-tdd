@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -14,6 +15,7 @@ from pathlib import Path, PurePosixPath
 
 
 DEFAULT_PATCH_BYTES = 16_384
+LEDGER_NAME = "star-state.json"
 CODE_PATH = re.compile(r"`([^`]+)`")
 
 
@@ -142,8 +144,25 @@ def classify(
     }
 
 
+def guard_written_ledgers(changed: list[str], repository_root: Path, ledger_sha: str | None) -> list[str]:
+    """Star ledgers changed only by the guard (same sha as its last write) are exempt."""
+    if not ledger_sha:
+        return []
+    exempt = []
+    for path in changed:
+        candidate = repository_root / path
+        if PurePosixPath(path).name == LEDGER_NAME and candidate.is_file():
+            if hashlib.sha256(candidate.read_bytes()).hexdigest() == ledger_sha:
+                exempt.append(path)
+    return exempt
+
+
 def create(
-    snapshot: str, todo: Path | None, limit: int, allowed_paths: list[str] | None = None
+    snapshot: str,
+    todo: Path | None,
+    limit: int,
+    allowed_paths: list[str] | None = None,
+    ledger_sha: str | None = None,
 ) -> dict[str, object]:
     git(["cat-file", "-e", f"{snapshot}^{{tree}}"])
     repository_root = Path(git(["rev-parse", "--show-toplevel"])).resolve()
@@ -195,7 +214,15 @@ def create(
             "boundary_violations": sorted(set(violations)),
         })
     else:
-        result.update(classify(changed, allowed, forbidden, [todo_path] if todo_path else []))
+        exempt = ([todo_path] if todo_path else []) + guard_written_ledgers(changed, repository_root, ledger_sha)
+        result.update(classify(changed, allowed, forbidden, exempt))
+        protected = [
+            path for path in changed
+            if PurePosixPath(path).name == LEDGER_NAME and path not in exempt
+        ]
+        if protected:
+            result["boundary_status"] = "violated"
+            result["boundary_violations"] = sorted(set(result["boundary_violations"]) | set(protected))
     return result
 
 
@@ -206,6 +233,7 @@ def main() -> None:
     boundary.add_argument("--todo", type=Path)
     boundary.add_argument("--allowed-paths-json")
     parser.add_argument("--max-patch-bytes", type=int, default=DEFAULT_PATCH_BYTES)
+    parser.add_argument("--ledger-sha", default="", help="sha256 of the star ledger as last written by the guard")
     args = parser.parse_args()
     if args.max_patch_bytes < 0:
         parser.error("--max-patch-bytes must be non-negative")
@@ -214,7 +242,7 @@ def main() -> None:
         not isinstance(allowed_paths, list) or not all(isinstance(path, str) for path in allowed_paths)
     ):
         parser.error("--allowed-paths-json must contain an array of paths")
-    print(json.dumps(create(args.snapshot_tree, args.todo, args.max_patch_bytes, allowed_paths)))
+    print(json.dumps(create(args.snapshot_tree, args.todo, args.max_patch_bytes, allowed_paths, args.ledger_sha or None)))
 
 
 if __name__ == "__main__":

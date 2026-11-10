@@ -1,0 +1,60 @@
+{
+  "description": "Canonical transitions of layered-star.yaml. A rule applies after spoke 'after' returned outcome done and 'when' holds over fresh facts. It reproduces the ltdd happy path; no rule, several rules, a non-done outcome, free text or a loop escalate to the hub.",
+  "rules": [
+    {"id": "E1", "after": "entry", "when": {"exists": "objective"}, "next": "requirements"},
+
+    {"id": "R1", "after": "requirements", "when": {"eq": ["requirements.decision", "approve"]}, "next": "triage"},
+    {"id": "R2", "after": "requirements", "when": {"eq": ["requirements.decision", "multiple_slices"]}, "next": "triage"},
+
+    {"id": "T1", "after": "triage", "when": {"eq": ["triage.fast_bounded", true]}, "next": "fast-change"},
+    {"id": "T2", "after": "triage", "when": {"all": [{"not": {"eq": ["triage.fast_bounded", true]}}, {"eq": ["requirements.multiple_slices", true]}]}, "next": "slice-selection"},
+    {"id": "T3", "after": "triage", "when": {"all": [{"not": {"eq": ["triage.fast_bounded", true]}}, {"not": {"eq": ["requirements.multiple_slices", true]}}]}, "next": "acceptance-design"},
+
+    {"id": "F1", "after": "fast-change", "when": {"all": [{"eq": ["fast.decision", "approve"]}, {"eq": ["fast.checks_green", true]}]}, "next": "$done"},
+
+    {"id": "S1", "after": "slice-selection", "when": {"eq": ["slice.decision", "approve"]}, "next": "acceptance-design"},
+
+    {"id": "A1", "after": "acceptance-design", "when": {"eq": ["acceptance.design_decision", "approve"]}, "next": "acceptance-build"},
+
+    {"id": "B1", "after": "acceptance-build", "when": {"all": [{"eq": ["acceptance.build_decision", "approve"]}, {"eq": ["acceptance.approved", true]}]}, "next": "layer-map"},
+    {"id": "B2", "after": "acceptance-build", "when": {"eq": ["acceptance.build_decision", "revise"]}, "next": "acceptance-design"},
+
+    {"id": "M1", "after": "layer-map", "when": {"eq": ["layer_map.decision", "approve"]}, "next": "layer-select"},
+
+    {"id": "L1", "after": "layer-select", "when": {"all": [{"eq": ["layer_select.decision", "selected"]}, {"eq": ["layer.work_kind", "cleanup"]}]}, "next": "cleanup-plan"},
+    {"id": "L2", "after": "layer-select", "when": {"all": [{"eq": ["layer_select.decision", "selected"]}, {"in": ["layer.work_kind", ["behavior", "infrastructure"]]}]}, "next": "layer-todo"},
+    {"id": "L3", "after": "layer-select", "when": {"eq": ["layer_select.decision", "revise_map"]}, "next": "layer-map"},
+
+    {"id": "D1", "after": "layer-todo", "when": {"eq": ["layer.todo_decision", "author_agent_test"]}, "next": "test-author"},
+    {"id": "D2", "after": "layer-todo", "when": {"eq": ["layer.todo_decision", "verify_existing_test"]}, "next": "red-gate"},
+    {"id": "D3", "after": "layer-todo", "when": {"all": [{"eq": ["layer.todo_decision", "approve_infrastructure"]}, {"eq": ["layer.work_kind", "infrastructure"]}]}, "next": "implement"},
+    {"id": "D4", "after": "layer-todo", "when": {"eq": ["layer.todo_decision", "select_other_layer"]}, "next": "layer-select"},
+
+    {"id": "TA1", "after": "test-author", "when": {"eq": ["layer.test_author_passed", true]}, "next": "red-gate"},
+
+    {"id": "G1", "after": "red-gate", "when": {"all": [{"in": ["layer.red_decision", ["confirm_red", "accept_green"]]}, {"eq": ["layer.red_gate_allowed", true]}]}, "next": "implement"},
+    {"id": "G2", "after": "red-gate", "when": {"any": [{"eq": ["layer.red_decision", "revise"]}, {"all": [{"in": ["layer.red_decision", ["confirm_red", "accept_green"]]}, {"not": {"eq": ["layer.red_gate_allowed", true]}}]}]}, "next": "layer-todo"},
+    {"id": "G3", "after": "red-gate", "when": {"eq": ["layer.red_decision", "select_other_layer"]}, "next": "layer-select"},
+
+    {"id": "I1", "after": "implement", "when": {"eq": ["layer.implemented", true]}, "next": "verify"},
+    {"id": "V1", "after": "verify", "when": {"eq": ["layer.verify_green", true]}, "next": "layer-review"},
+
+    {"id": "RV1", "after": "layer-review", "when": {"eq": ["layer.review_decision", "approve_more_layers"]}, "next": "layer-select"},
+    {"id": "RV2", "after": "layer-review", "when": {"eq": ["layer.review_decision", "approve_final_review"]}, "next": "final"},
+    {"id": "RV3", "after": "layer-review", "when": {"eq": ["layer.review_decision", "request_fixes"]}, "next": "implement"},
+
+    {"id": "C1", "after": "cleanup-plan", "when": {"all": [{"eq": ["layer.cleanup_plan_decision", "approve_cleanup"]}, {"eq": ["layer.cleanup_baseline_green", true]}]}, "next": "cleanup-implement"},
+    {"id": "C2", "after": "cleanup-plan", "when": {"eq": ["layer.cleanup_plan_decision", "select_other_layer"]}, "next": "layer-select"},
+    {"id": "CI1", "after": "cleanup-implement", "when": {"eq": ["layer.implemented", true]}, "next": "cleanup-verify"},
+    {"id": "CV1", "after": "cleanup-verify", "when": {"eq": ["layer.verify_green", true]}, "next": "cleanup-review"},
+    {"id": "CR1", "after": "cleanup-review", "when": {"eq": ["layer.review_decision", "approve_more_layers"]}, "next": "layer-select"},
+    {"id": "CR2", "after": "cleanup-review", "when": {"eq": ["layer.review_decision", "approve_final_review"]}, "next": "final"},
+    {"id": "CR3", "after": "cleanup-review", "when": {"eq": ["layer.review_decision", "request_fixes"]}, "next": "cleanup-implement"},
+    {"id": "CR4", "after": "cleanup-review", "when": {"eq": ["layer.review_decision", "revise_plan"]}, "next": "cleanup-plan"},
+
+    {"id": "FN1", "after": "final", "when": {"all": [{"eq": ["final.acceptance_green", true]}, {"eq": ["final.reviewed", true]}]}, "next": "memory"},
+
+    {"id": "MM1", "after": "memory", "when": {"in": ["memory.decision", ["capture", "skip"]]}, "next": "$done"},
+    {"id": "MM2", "after": "memory", "when": {"eq": ["memory.decision", "revise_review"]}, "next": "final"}
+  ]
+}

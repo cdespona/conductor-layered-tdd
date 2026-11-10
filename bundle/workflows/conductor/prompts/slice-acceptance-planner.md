@@ -68,3 +68,11 @@ mode only when the request truly changes no observable behavior; otherwise resol
 why the proposed test is not exposing the missing behavior with the human.
 
 Return `artifact_path` and a concise `summary` of decisions, scope and questions.
+
+{% for star in [star_step] if star is defined and star.output is defined %}
+## Star workflow
+
+{% if star.output.objective is defined and star.output.objective %}Objective: {{ star.output.objective }}
+{% endif %}{% if star.output.brief is defined and star.output.brief %}Brief from the hub for this visit (prioritize it over your default next step): {{ star.output.brief }}
+{% endif %}The star router chooses what runs next; do not assume a fixed next step. Also return the star return contract: `outcome` (`done`, `blocked`, `needs-human` or `incoherence`), `reason`, `artifacts` (repository-relative paths you created or changed) and `incoherence` as `{"claim": ..., "source": ..., "conflicts_with": ...}` when an approved contract, test or artifact contradicts the work, otherwise `{}`. Report an incoherence instead of editing a protected contract.
+{% endfor %}

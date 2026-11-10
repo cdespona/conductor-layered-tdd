@@ -1,0 +1,2922 @@
+# Star-shaped layered TDD workflow for Microsoft Conductor.
+#
+# Run (or use `ltdd run`):
+#   conductor run workflows/conductor/layered-star.yaml \
+#     --workspace-instructions \
+#     --web \
+#     --input request="Describe the code-changing task"
+#
+# Fixed entry: preflight -> graphify -> objective gate (only without a request).
+# Then every spoke returns to `star_step`: a deterministic router (canonical
+# table in star/canonical-table.json) plus the guard (invariants I1-I10). The
+# hub agent is called only on frontier cases; non-obvious hub jumps go to the
+# generic `confirm_gate`. The ledger is .github/plans/<slug>/star-state.json.
+#
+# This workflow assumes the Copilot provider and local repository tools are
+# available through Conductor/Copilot CLI.
+workflow:
+  name: layered-star
+  description: Star-shaped layered TDD with a deterministic router, a guard and a light hub for frontier cases.
+  version: "0.1.0"
+  entry_point: preflight_tests
+  runtime:
+    provider: copilot
+    default_model: gpt-6-sol
+    default_reasoning_effort: medium
+  context:
+    mode: explicit
+  instructions:
+    - "This workflow is self-contained. Use the installed workflow prompts and any repo-local Conductor skills under `.github/skills/conductor-*/`; do not require LTDD documentation files to exist in the target repository."
+    - "Before code-changing agent work, check whether a relevant `.github/skills/conductor-<skill>/SKILL.md` exists and follow it when applicable. A bounded context field that explicitly lists matching skill paths satisfies the existence check; do not search again when that list is present."
+    - "If the Copilot CLI caveman skill is available, use caveman for planning notes, checkpoints, summaries, and human gate text. Keep artifact schemas, commands, paths, errors, and verification results exact and readable."
+    - "For standard slices, the human-approved 02-slice-acceptance.json is the outer behavior contract. Its scenario and protected_files (tests, DSL, drivers, fixtures, approved persistence representations) remain read-only during layers. Report an incoherence instead of changing them. Layer regression excludes only the named pending outer AT; every other failure remains blocking and final slice acceptance must be green."
+    - "When graphify-out/graph.json exists, use Graphify only for bounded repository-navigation questions before opening returned source locations. Do not rebuild or update the graph from an agent prompt."
+    - "Never edit `.github/plans/*/star-state.json`; only the star_step guard writes it."
+  limits:
+    max_iterations: 500
+    # The star benchmark runs each case with budget_mode: enforce.
+    budget_usd: 5.0
+    budget_mode: audit
+  input:
+    request:
+      type: string
+      required: false
+      default: ""
+      description: The code-changing objective. When empty, the objective gate asks for it.
+    task_slug:
+      type: string
+      required: false
+      default: ""
+      description: Optional folder name under .github/plans/.
+    test_command:
+      type: string
+      required: false
+      default: make test
+      description: Initial full suite; basis for the human-approved layer regression command.
+    lint_command:
+      type: string
+      required: false
+      default: make lint
+      description: Command run before analysis and after implementation for lint/static checks.
+    security_command:
+      type: string
+      required: false
+      default: make audit
+      description: Command run before analysis and after implementation for dependency/CVE checks.
+    resume_path:
+      type: string
+      required: false
+      default: ""
+      description: Optional existing .github/plans/<slug> folder to resume (its star-state.json is reused).
+    memory_vault:
+      type: string
+      required: false
+      description: Absolute path to the Markdown memory vault root. Required for memory capture.
+    memory_namespace:
+      type: string
+      required: false
+      default: machine/agent-memory
+      description: Markdown memory namespace under the vault root.
+    memory_project:
+      type: string
+      required: false
+      description: Markdown memory project slug. Required for memory capture.
+    graphify_scope:
+      type: string
+      required: false
+      description: Optional relative code directory for Graphify. A first build defaults to the repository root; an existing graph reuses its saved scan root.
+    max_escalations:
+      type: number
+      required: false
+      default: 5
+      description: Escalations to the hub allowed per run before a gate asks whether to continue.
+
+agents:
+  # ---------------------------------------------------------------------------
+  # Fixed entry: preflight -> graphify -> objective gate
+  # ---------------------------------------------------------------------------
+  - name: preflight_tests
+    type: script
+    description: Run the test suite before spending model time on analysis.
+    command: sh
+    args:
+      - -lc
+      - "{{ workflow.input.test_command }}"
+    timeout: 600
+    routes:
+      - to: preflight_lint
+        when: "{{ output.exit_code == 0 }}"
+      - to: preflight_failure_gate
+
+  - name: preflight_lint
+    type: script
+    description: Run lint/static checks before analysis.
+    command: sh
+    args:
+      - -lc
+      - "{{ workflow.input.lint_command }}"
+    timeout: 600
+    routes:
+      - to: preflight_security
+        when: "{{ output.exit_code == 0 }}"
+      - to: preflight_failure_gate
+
+  - name: preflight_security
+    type: script
+    description: Run dependency/CVE checks before analysis.
+    command: sh
+    args:
+      - -lc
+      - "{{ workflow.input.security_command }}"
+    timeout: 600
+    routes:
+      - to: graphify_status
+        when: "{{ output.exit_code == 0 }}"
+      - to: preflight_failure_gate
+
+  - name: preflight_failure_gate
+    type: human_gate
+    prompt: |
+      A preflight command failed before requirements analysis. Fix the existing
+      regression/check failure, override the Make target, or stop the workflow.
+    options:
+      - label: I fixed the failing preflight command; rerun preflight.
+        value: retry
+        route: preflight_tests
+      - label: Continue anyway and record that preflight was waived.
+        value: continue_with_waiver
+        route: graphify_status
+      - label: Stop before requirements analysis.
+        value: stop
+        route: stopped
+
+  - name: graphify_status
+    type: script
+    description: Detect whether a reusable Graphify repository graph is available.
+    command: sh
+    args:
+      - -lc
+      - |
+        if [ -f graphify-out/graph.json ]; then
+          printf '{"graph_available":true,"summary":"Existing Graphify graph is available."}\n'
+        else
+          printf '{"graph_available":false,"summary":"No Graphify graph exists yet."}\n'
+        fi
+    routes:
+      - to: graphify_update_gate
+
+  - name: graphify_update_gate
+    type: human_gate
+    prompt: |
+      Decide whether repository navigation should use a refreshed Graphify graph
+      before requirements discovery. Graphify is optional; the Markdown
+      artifacts and your reviews remain the authoritative workflow handoff.
+
+      Current graph: {{ graphify_status.output.summary }}
+
+      A first build scans repository code by default. To narrow the scan, provide
+      `graphify_scope` in the run input (for example `src` or `packages/api`).
+    options:
+      - label: Build or incrementally refresh the focused Graphify graph.
+        value: refresh
+        route: graphify_refresh
+      - label: Use the existing graph without refreshing it.
+        value: use_existing
+        route: star_step
+      - label: Continue without Graphify for this run.
+        value: skip
+        route: star_step
+
+  - name: graphify_refresh
+    type: script
+    description: Build a focused Graphify code graph or incrementally refresh the existing one.
+    command: sh
+    args:
+      - -lc
+      - |
+        set -u
+        graph_file="graphify-out/graph.json"
+        graph_log="$(mktemp "${TMPDIR:-/tmp}/conductor-graphify.XXXXXX")"
+        scope="${GRAPHIFY_SCOPE:-}"
+
+        if [ -f "$graph_file" ] && [ -z "$scope" ] && [ -f graphify-out/.graphify_root ]; then
+          scope="$(cat graphify-out/.graphify_root)"
+        fi
+
+        if [ -z "$scope" ]; then
+          scope="."
+        fi
+        if [ ! -d "$scope" ]; then
+          printf '{"graph_available":false,"refresh_succeeded":false,"reason":"invalid_scope","log_path":"%s","summary":"graphify_scope is not a readable directory."}\n' "$graph_log"
+          exit 0
+        fi
+        if ! command -v graphify >/dev/null 2>&1; then
+          printf '{"graph_available":false,"refresh_succeeded":false,"reason":"graphify_unavailable","log_path":"%s","summary":"The graphify CLI is not installed or not on PATH."}\n' "$graph_log"
+          exit 0
+        fi
+
+        if [ -f "$graph_file" ]; then
+          graphify "$scope" --update --code-only --directed --no-viz --out . >"$graph_log" 2>&1
+        else
+          graphify "$scope" --code-only --directed --no-viz --out . >"$graph_log" 2>&1
+        fi
+        graphify_exit_code=$?
+
+        if [ "$graphify_exit_code" -eq 0 ] && [ -f "$graph_file" ]; then
+          printf '{"graph_available":true,"refresh_succeeded":true,"reason":"","log_path":"%s","summary":"Graphify graph is ready for bounded repository queries."}\n' "$graph_log"
+        else
+          printf '{"graph_available":false,"refresh_succeeded":false,"reason":"graphify_failed","log_path":"%s","summary":"Graphify did not produce a usable graph; inspect the Graphify log and choose a recovery option."}\n' "$graph_log"
+        fi
+    env:
+      GRAPHIFY_SCOPE: "{{ workflow.input.graphify_scope }}"
+    routes:
+      - to: star_step
+        when: "{{ output.refresh_succeeded }}"
+      - to: graphify_refresh_failure_gate
+
+  - name: graphify_refresh_failure_gate
+    type: human_gate
+    prompt: |
+      Graphify could not prepare a usable graph before requirements discovery.
+
+      Result: {{ graphify_refresh.output.summary }}
+      Reason: `{{ graphify_refresh.output.reason }}`
+      Graphify log: `{{ graphify_refresh.output.log_path }}`
+
+      Inspect the Graphify log, then restart with a corrected `graphify_scope`
+      or Graphify installation if needed. You can also continue without a graph.
+    options:
+      - label: Continue without Graphify for this run.
+        value: continue_without_graph
+        route: star_step
+      - label: Stop and fix the Graphify setup.
+        value: stop
+        route: stopped
+
+  - name: objective_gate
+    type: human_gate
+    prompt: |
+      What are we going to work on? Describe the code-changing objective.
+      An empty answer asks again; choose Cancel to end the run.
+    options:
+      - label: Work on this objective.
+        value: objective
+        prompt_for: objective
+        multiline: true
+        route: star_step
+      - label: Cancel the run.
+        value: cancel
+        route: cancelled
+
+  # ---------------------------------------------------------------------------
+  # Center: star_step (router + guard), hub and the generic confirmation gate
+  # ---------------------------------------------------------------------------
+  - name: star_step
+    type: script
+    description: Deterministic router and guard; the only writer of the star ledger.
+    command: python3
+    args:
+      - workflows/conductor/scripts/star-step.py
+    timeout: 300
+    input:
+      - star_step.output?
+      - preflight_failure_gate.output?
+      - graphify_status.output?
+      - graphify_refresh.output?
+      - objective_gate.output?
+      - hub.output?
+      - confirm_gate.output?
+      - requirements_griller.output?
+      - requirements_gate.output?
+      - requirements_reviser.output?
+      - requirements_revision_gate.output?
+      - fast_triage.output?
+      - fast_snapshot.output?
+      - fast_implementor.output?
+      - fast_change_check.output?
+      - fast_verification_tests.output?
+      - fast_verification_lint.output?
+      - fast_verification_security.output?
+      - fast_approval_gate.output?
+      - slice_selection_gate.output?
+      - slice_selection_reviser.output?
+      - slice_selection_revision_gate.output?
+      - slice_run_starter.output?
+      - slice_requirements_gate.output?
+      - slice_requirements_reviser.output?
+      - slice_requirements_revision_gate.output?
+      - slice_acceptance_planner.output?
+      - slice_acceptance_design_gate.output?
+      - slice_acceptance_prepare.output?
+      - slice_acceptance_builder.output?
+      - slice_acceptance_verify.output?
+      - slice_acceptance_validation_gate.output?
+      - slice_acceptance_approve.output?
+      - layer_mapper.output?
+      - layer_map_gate.output?
+      - layer_map_reviser.output?
+      - layer_map_revision_gate.output?
+      - layer_selection_gate.output?
+      - layer_selection_recorder.output?
+      - selected_layer_router.output?
+      - selected_layer_context.output?
+      - layer_todo_generator.output?
+      - layer_todo_gate.output?
+      - layer_todo_reviser.output?
+      - layer_todo_revision_gate.output?
+      - test_author_preparer.output?
+      - test_author_context.output?
+      - test_author_snapshot.output?
+      - agent_test_author.output?
+      - test_author_completion_recorder.output?
+      - red_suite_verifier.output?
+      - red_suite_evidence_recorder.output?
+      - red_suite_evidence_gate.output?
+      - red_gate_decision_recorder.output?
+      - implementation_context.output?
+      - layer_snapshot.output?
+      - implementor.output?
+      - verification_tests.output?
+      - verification_lint.output?
+      - verification_security.output?
+      - layer_diff.output?
+      - layer_reviewer.output?
+      - layer_approval_gate.output?
+      - cleanup_plan_context.output?
+      - cleanup_planner.output?
+      - cleanup_plan_gate.output?
+      - cleanup_plan_reviser.output?
+      - cleanup_plan_revision_gate.output?
+      - cleanup_plan_validator.output?
+      - cleanup_baseline_tests.output?
+      - cleanup_baseline_lint.output?
+      - cleanup_baseline_security.output?
+      - cleanup_implementation_context.output?
+      - cleanup_layer_snapshot.output?
+      - cleanup_implementor.output?
+      - cleanup_verification_tests.output?
+      - cleanup_verification_lint.output?
+      - cleanup_verification_security.output?
+      - cleanup_result_check.output?
+      - cleanup_layer_diff.output?
+      - cleanup_reviewer.output?
+      - cleanup_approval_gate.output?
+      - slice_acceptance_final.output?
+      - final_reviewer.output?
+      - memory_gate.output?
+      - memory_capturer.output?
+    stdin: >-
+      {{ {'history': context.history, 'inputs': workflow.input,
+          'self': (star_step.output if star_step is defined else none),
+          'outputs': {
+            'preflight_failure_gate': (preflight_failure_gate.output if preflight_failure_gate is defined else none),
+            'graphify_status': ({'graph_available': graphify_status.output.graph_available | default(none)} if graphify_status is defined else none),
+            'graphify_refresh': ({'graph_available': graphify_refresh.output.graph_available | default(none), 'refresh_succeeded': graphify_refresh.output.refresh_succeeded | default(none)} if graphify_refresh is defined else none),
+            'objective_gate': (objective_gate.output if objective_gate is defined else none),
+            'hub': (hub.output if hub is defined else none),
+            'confirm_gate': (confirm_gate.output if confirm_gate is defined else none),
+            'requirements_griller': (requirements_griller.output if requirements_griller is defined else none),
+            'requirements_gate': (requirements_gate.output if requirements_gate is defined else none),
+            'requirements_reviser': (requirements_reviser.output if requirements_reviser is defined else none),
+            'requirements_revision_gate': (requirements_revision_gate.output if requirements_revision_gate is defined else none),
+            'fast_triage': (fast_triage.output if fast_triage is defined else none),
+            'fast_snapshot': (fast_snapshot.output if fast_snapshot is defined else none),
+            'fast_implementor': (fast_implementor.output if fast_implementor is defined else none),
+            'fast_change_check': ({'changed_files': fast_change_check.output.changed_files | default(none), 'boundary_status': fast_change_check.output.boundary_status | default(none), 'boundary_violations': fast_change_check.output.boundary_violations | default(none), 'exit_code': fast_change_check.output.exit_code | default(none)} if fast_change_check is defined else none),
+            'fast_verification_tests': ({'exit_code': fast_verification_tests.output.exit_code | default(none), 'failed_count': fast_verification_tests.output.failed_count | default(none)} if fast_verification_tests is defined else none),
+            'fast_verification_lint': ({'exit_code': fast_verification_lint.output.exit_code | default(none), 'failed_count': fast_verification_lint.output.failed_count | default(none)} if fast_verification_lint is defined else none),
+            'fast_verification_security': ({'exit_code': fast_verification_security.output.exit_code | default(none), 'failed_count': fast_verification_security.output.failed_count | default(none)} if fast_verification_security is defined else none),
+            'fast_approval_gate': (fast_approval_gate.output if fast_approval_gate is defined else none),
+            'slice_selection_gate': (slice_selection_gate.output if slice_selection_gate is defined else none),
+            'slice_selection_reviser': (slice_selection_reviser.output if slice_selection_reviser is defined else none),
+            'slice_selection_revision_gate': (slice_selection_revision_gate.output if slice_selection_revision_gate is defined else none),
+            'slice_run_starter': (slice_run_starter.output if slice_run_starter is defined else none),
+            'slice_requirements_gate': (slice_requirements_gate.output if slice_requirements_gate is defined else none),
+            'slice_requirements_reviser': (slice_requirements_reviser.output if slice_requirements_reviser is defined else none),
+            'slice_requirements_revision_gate': (slice_requirements_revision_gate.output if slice_requirements_revision_gate is defined else none),
+            'slice_acceptance_planner': (slice_acceptance_planner.output if slice_acceptance_planner is defined else none),
+            'slice_acceptance_design_gate': (slice_acceptance_design_gate.output if slice_acceptance_design_gate is defined else none),
+            'slice_acceptance_prepare': (slice_acceptance_prepare.output if slice_acceptance_prepare is defined else none),
+            'slice_acceptance_builder': (slice_acceptance_builder.output if slice_acceptance_builder is defined else none),
+            'slice_acceptance_verify': ({'proceed': slice_acceptance_verify.output.proceed | default(none), 'summary': slice_acceptance_verify.output.summary | default(none), 'changed_files': slice_acceptance_verify.output.changed_files | default(none)} if slice_acceptance_verify is defined else none),
+            'slice_acceptance_validation_gate': (slice_acceptance_validation_gate.output if slice_acceptance_validation_gate is defined else none),
+            'slice_acceptance_approve': (slice_acceptance_approve.output if slice_acceptance_approve is defined else none),
+            'layer_mapper': (layer_mapper.output if layer_mapper is defined else none),
+            'layer_map_gate': (layer_map_gate.output if layer_map_gate is defined else none),
+            'layer_map_reviser': (layer_map_reviser.output if layer_map_reviser is defined else none),
+            'layer_map_revision_gate': (layer_map_revision_gate.output if layer_map_revision_gate is defined else none),
+            'layer_selection_gate': (layer_selection_gate.output if layer_selection_gate is defined else none),
+            'layer_selection_recorder': (layer_selection_recorder.output if layer_selection_recorder is defined else none),
+            'selected_layer_router': (selected_layer_router.output if selected_layer_router is defined else none),
+            'selected_layer_context': ({'todo_path': selected_layer_context.output.todo_path | default(none), 'layer_size': selected_layer_context.output.layer_size | default(none), 'selected_layer': selected_layer_context.output.selected_layer | default(none)} if selected_layer_context is defined else none),
+            'layer_todo_generator': (layer_todo_generator.output if layer_todo_generator is defined else none),
+            'layer_todo_gate': (layer_todo_gate.output if layer_todo_gate is defined else none),
+            'layer_todo_reviser': (layer_todo_reviser.output if layer_todo_reviser is defined else none),
+            'layer_todo_revision_gate': (layer_todo_revision_gate.output if layer_todo_revision_gate is defined else none),
+            'test_author_preparer': (test_author_preparer.output if test_author_preparer is defined else none),
+            'test_author_context': ({'todo_path': test_author_context.output.todo_path | default(none), 'layer_size': test_author_context.output.layer_size | default(none), 'selected_layer': test_author_context.output.selected_layer | default(none)} if test_author_context is defined else none),
+            'test_author_snapshot': (test_author_snapshot.output if test_author_snapshot is defined else none),
+            'agent_test_author': (agent_test_author.output if agent_test_author is defined else none),
+            'test_author_completion_recorder': (test_author_completion_recorder.output if test_author_completion_recorder is defined else none),
+            'red_suite_verifier': ({'exit_code': red_suite_verifier.output.exit_code | default(none), 'evidence_path': red_suite_verifier.output.evidence_path | default(none)} if red_suite_verifier is defined else none),
+            'red_suite_evidence_recorder': ({'summary': red_suite_evidence_recorder.output.summary | default(none)} if red_suite_evidence_recorder is defined else none),
+            'red_suite_evidence_gate': (red_suite_evidence_gate.output if red_suite_evidence_gate is defined else none),
+            'red_gate_decision_recorder': (red_gate_decision_recorder.output if red_gate_decision_recorder is defined else none),
+            'implementation_context': ({'todo_path': implementation_context.output.todo_path | default(none), 'layer_size': implementation_context.output.layer_size | default(none), 'selected_layer': implementation_context.output.selected_layer | default(none)} if implementation_context is defined else none),
+            'layer_snapshot': (layer_snapshot.output if layer_snapshot is defined else none),
+            'implementor': (implementor.output if implementor is defined else none),
+            'verification_tests': ({'exit_code': verification_tests.output.exit_code | default(none), 'failed_count': verification_tests.output.failed_count | default(none)} if verification_tests is defined else none),
+            'verification_lint': ({'exit_code': verification_lint.output.exit_code | default(none), 'failed_count': verification_lint.output.failed_count | default(none)} if verification_lint is defined else none),
+            'verification_security': ({'exit_code': verification_security.output.exit_code | default(none), 'failed_count': verification_security.output.failed_count | default(none)} if verification_security is defined else none),
+            'layer_diff': ({'changed_files': layer_diff.output.changed_files | default(none), 'boundary_status': layer_diff.output.boundary_status | default(none), 'boundary_violations': layer_diff.output.boundary_violations | default(none), 'exit_code': layer_diff.output.exit_code | default(none)} if layer_diff is defined else none),
+            'layer_reviewer': (layer_reviewer.output if layer_reviewer is defined else none),
+            'layer_approval_gate': (layer_approval_gate.output if layer_approval_gate is defined else none),
+            'cleanup_plan_context': ({'todo_path': cleanup_plan_context.output.todo_path | default(none), 'layer_size': cleanup_plan_context.output.layer_size | default(none), 'selected_layer': cleanup_plan_context.output.selected_layer | default(none)} if cleanup_plan_context is defined else none),
+            'cleanup_planner': (cleanup_planner.output if cleanup_planner is defined else none),
+            'cleanup_plan_gate': (cleanup_plan_gate.output if cleanup_plan_gate is defined else none),
+            'cleanup_plan_reviser': (cleanup_plan_reviser.output if cleanup_plan_reviser is defined else none),
+            'cleanup_plan_revision_gate': (cleanup_plan_revision_gate.output if cleanup_plan_revision_gate is defined else none),
+            'cleanup_plan_validator': (cleanup_plan_validator.output if cleanup_plan_validator is defined else none),
+            'cleanup_baseline_tests': ({'exit_code': cleanup_baseline_tests.output.exit_code | default(none), 'failed_count': cleanup_baseline_tests.output.failed_count | default(none)} if cleanup_baseline_tests is defined else none),
+            'cleanup_baseline_lint': ({'exit_code': cleanup_baseline_lint.output.exit_code | default(none), 'failed_count': cleanup_baseline_lint.output.failed_count | default(none)} if cleanup_baseline_lint is defined else none),
+            'cleanup_baseline_security': ({'exit_code': cleanup_baseline_security.output.exit_code | default(none), 'failed_count': cleanup_baseline_security.output.failed_count | default(none)} if cleanup_baseline_security is defined else none),
+            'cleanup_implementation_context': ({'todo_path': cleanup_implementation_context.output.todo_path | default(none), 'layer_size': cleanup_implementation_context.output.layer_size | default(none), 'selected_layer': cleanup_implementation_context.output.selected_layer | default(none)} if cleanup_implementation_context is defined else none),
+            'cleanup_layer_snapshot': (cleanup_layer_snapshot.output if cleanup_layer_snapshot is defined else none),
+            'cleanup_implementor': (cleanup_implementor.output if cleanup_implementor is defined else none),
+            'cleanup_verification_tests': ({'exit_code': cleanup_verification_tests.output.exit_code | default(none), 'failed_count': cleanup_verification_tests.output.failed_count | default(none)} if cleanup_verification_tests is defined else none),
+            'cleanup_verification_lint': ({'exit_code': cleanup_verification_lint.output.exit_code | default(none), 'failed_count': cleanup_verification_lint.output.failed_count | default(none)} if cleanup_verification_lint is defined else none),
+            'cleanup_verification_security': ({'exit_code': cleanup_verification_security.output.exit_code | default(none), 'failed_count': cleanup_verification_security.output.failed_count | default(none)} if cleanup_verification_security is defined else none),
+            'cleanup_result_check': (cleanup_result_check.output if cleanup_result_check is defined else none),
+            'cleanup_layer_diff': ({'changed_files': cleanup_layer_diff.output.changed_files | default(none), 'boundary_status': cleanup_layer_diff.output.boundary_status | default(none), 'boundary_violations': cleanup_layer_diff.output.boundary_violations | default(none), 'exit_code': cleanup_layer_diff.output.exit_code | default(none)} if cleanup_layer_diff is defined else none),
+            'cleanup_reviewer': (cleanup_reviewer.output if cleanup_reviewer is defined else none),
+            'cleanup_approval_gate': (cleanup_approval_gate.output if cleanup_approval_gate is defined else none),
+            'slice_acceptance_final': ({'proceed': slice_acceptance_final.output.proceed | default(none), 'summary': slice_acceptance_final.output.summary | default(none)} if slice_acceptance_final is defined else none),
+            'final_reviewer': (final_reviewer.output if final_reviewer is defined else none),
+            'memory_gate': (memory_gate.output if memory_gate is defined else none),
+            'memory_capturer': (memory_capturer.output if memory_capturer is defined else none)
+          }} | tojson }}
+    output:
+      next:
+        type: string
+        description: Next route; any other value (needs-human halt) fails on purpose so Conductor saves a resumable checkpoint.
+        enum:
+          - requirements_griller
+          - requirements_reviser
+          - fast_triage
+          - fast_snapshot
+          - slice_selection_gate
+          - slice_acceptance_planner
+          - slice_acceptance_prepare
+          - layer_mapper
+          - layer_map_reviser
+          - layer_selection_gate
+          - selected_layer_context
+          - layer_todo_reviser
+          - test_author_preparer
+          - red_suite_verifier
+          - implementation_context
+          - verification_tests
+          - layer_reviewer
+          - cleanup_plan_context
+          - cleanup_plan_reviser
+          - cleanup_implementation_context
+          - cleanup_verification_tests
+          - cleanup_reviewer
+          - slice_acceptance_final
+          - memory_gate
+          - hub
+          - confirm_gate
+          - objective_gate
+          - done
+          - stopped
+          - failed
+    routes:
+      - to: requirements_griller
+        when: "{{ output.next == 'requirements_griller' }}"
+      - to: requirements_reviser
+        when: "{{ output.next == 'requirements_reviser' }}"
+      - to: fast_triage
+        when: "{{ output.next == 'fast_triage' }}"
+      - to: fast_snapshot
+        when: "{{ output.next == 'fast_snapshot' }}"
+      - to: slice_selection_gate
+        when: "{{ output.next == 'slice_selection_gate' }}"
+      - to: slice_acceptance_planner
+        when: "{{ output.next == 'slice_acceptance_planner' }}"
+      - to: slice_acceptance_prepare
+        when: "{{ output.next == 'slice_acceptance_prepare' }}"
+      - to: layer_mapper
+        when: "{{ output.next == 'layer_mapper' }}"
+      - to: layer_map_reviser
+        when: "{{ output.next == 'layer_map_reviser' }}"
+      - to: layer_selection_gate
+        when: "{{ output.next == 'layer_selection_gate' }}"
+      - to: selected_layer_context
+        when: "{{ output.next == 'selected_layer_context' }}"
+      - to: layer_todo_reviser
+        when: "{{ output.next == 'layer_todo_reviser' }}"
+      - to: test_author_preparer
+        when: "{{ output.next == 'test_author_preparer' }}"
+      - to: red_suite_verifier
+        when: "{{ output.next == 'red_suite_verifier' }}"
+      - to: implementation_context
+        when: "{{ output.next == 'implementation_context' }}"
+      - to: verification_tests
+        when: "{{ output.next == 'verification_tests' }}"
+      - to: layer_reviewer
+        when: "{{ output.next == 'layer_reviewer' }}"
+      - to: cleanup_plan_context
+        when: "{{ output.next == 'cleanup_plan_context' }}"
+      - to: cleanup_plan_reviser
+        when: "{{ output.next == 'cleanup_plan_reviser' }}"
+      - to: cleanup_implementation_context
+        when: "{{ output.next == 'cleanup_implementation_context' }}"
+      - to: cleanup_verification_tests
+        when: "{{ output.next == 'cleanup_verification_tests' }}"
+      - to: cleanup_reviewer
+        when: "{{ output.next == 'cleanup_reviewer' }}"
+      - to: slice_acceptance_final
+        when: "{{ output.next == 'slice_acceptance_final' }}"
+      - to: memory_gate
+        when: "{{ output.next == 'memory_gate' }}"
+      - to: hub
+        when: "{{ output.next == 'hub' }}"
+      - to: confirm_gate
+        when: "{{ output.next == 'confirm_gate' }}"
+      - to: objective_gate
+        when: "{{ output.next == 'objective_gate' }}"
+      - to: done
+        when: "{{ output.next == 'done' }}"
+      - to: stopped
+        when: "{{ output.next == 'stopped' }}"
+      - to: failed
+        when: "{{ output.next == 'failed' }}"
+      - to: failed
+
+  - name: hub
+    description: Propose the next spoke for a frontier case; never decides alone on non-obvious jumps.
+    model: gpt-6-luna
+    reasoning:
+      effort: high
+    tools: []
+    input:
+      - star_step.output.hub_input
+    prompt: !file prompts/star-hub.md
+    output:
+      next:
+        type: string
+        enum: [requirements, triage, fast-change, slice-selection, acceptance-design, acceptance-build, layer-map, layer-select, layer-todo, test-author, red-gate, implement, verify, layer-review, cleanup-plan, cleanup-implement, cleanup-verify, cleanup-review, final, memory, ask_human, stop]
+        description: Next spoke, ask_human or stop.
+      reason:
+        type: string
+        description: Why this spoke.
+      brief:
+        type: string
+        description: Concrete instruction for the destination spoke.
+      alternatives:
+        type: array
+        description: 0-2 other legal options as objects with next and reason.
+      confidence:
+        type: string
+        enum: [low, medium, high]
+        description: Confidence in the proposal.
+    routes:
+      - to: star_step
+
+  - name: confirm_gate
+    type: questions
+    description: Generic confirmation of a non-obvious jump with its computed consequences.
+    input:
+      - star_step.output.confirm_prompt?
+      - star_step.output.confirm_questions?
+    prompt: |
+      Non-obvious jump: confirm, pick an alternative, write something else or stop.
+    source: star_step.output.confirm_questions
+    allow_back: false
+    allow_skip: false
+    allow_skip_all: false
+    allow_abort: false
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: requirements
+  # ---------------------------------------------------------------------------
+  - name: requirements_griller
+    description: Capture requirements, blockers, assumptions, and slice split.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - workflow.input.request
+      - workflow.input.resume_path?
+      - workflow.input.memory_vault?
+      - workflow.input.memory_namespace?
+      - workflow.input.memory_project?
+      - graphify_status.output.graph_available?
+      - graphify_status.output.summary?
+      - graphify_refresh.output.graph_available?
+      - graphify_refresh.output.summary?
+      - star_step.output.objective
+      - star_step.output.brief?
+    prompt: !file prompts/requirements-griller.md
+    output:
+      artifact_path:
+        type: string
+        description: Path to the requirements or slice-selection artifact.
+      task_slug:
+        type: string
+        description: Current or recommended task slug.
+      multiple_slices:
+        type: boolean
+        description: True when the request contains multiple valuable slices.
+      blocker_count:
+        type: number
+        description: Number of unresolved blocker questions.
+      summary:
+        type: string
+        description: Short human-readable summary of what was produced.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' or output.multiple_slices }}"
+      - to: requirements_gate
+
+  - name: requirements_gate
+    type: human_gate
+    prompt: |
+      Review `00-requirements.md`. Confirm the selected slice goal, blockers,
+      non-blocker assumptions, and explicitly out-of-scope work. If you edited
+      `00-requirements.md` or added feedback there, choose revise so the
+      pinned reviser can update that same artifact before mapping.
+
+      Requirements artifact: `{{ requirements_griller.output.artifact_path }}`
+      Task slug: `{{ requirements_griller.output.task_slug }}`
+      Blocker count: {{ requirements_griller.output.blocker_count }}
+      Summary: {{ requirements_griller.output.summary }}
+    options:
+      - label: Requirements are confirmed for one selected slice.
+        value: approve
+        prompt_for: feedback
+        route: star_step
+      - label: I edited or commented on requirements; revise this same artifact.
+        value: revise
+        prompt_for: feedback
+        route: requirements_reviser
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this run.
+        value: stop
+        route: star_step
+
+  - name: requirements_reviser
+    description: Reconcile human feedback into the originally created requirements artifact.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - requirements_griller.output.artifact_path
+      - star_step.output.brief?
+    prompt: !file prompts/requirements-reviser.md
+    output:
+      artifact_path:
+        type: string
+        description: The same requirements artifact revised in place.
+      task_slug:
+        type: string
+        description: Unchanged task slug for the active requirements artifact.
+      blocker_count:
+        type: number
+        description: Number of unresolved blocker questions after revision.
+      summary:
+        type: string
+        description: Short human-readable summary of the revision.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' }}"
+      - to: requirements_revision_gate
+
+  - name: requirements_revision_gate
+    type: human_gate
+    prompt: |
+      Review the requirements revision. This is the same artifact as before;
+      it was revised in place rather than started as a new plan.
+
+      Requirements artifact: `{{ requirements_reviser.output.artifact_path }}`
+      Task slug: `{{ requirements_reviser.output.task_slug }}`
+      Blocker count: {{ requirements_reviser.output.blocker_count }}
+      Summary: {{ requirements_reviser.output.summary }}
+    options:
+      - label: Requirements are confirmed for this same slice.
+        value: approve
+        prompt_for: feedback
+        route: star_step
+      - label: I edited or commented on requirements; revise this same artifact again.
+        value: revise
+        prompt_for: feedback
+        route: requirements_reviser
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this run.
+        value: stop
+        route: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: triage
+  # ---------------------------------------------------------------------------
+  - name: fast_triage
+    description: Route only clearly bounded work that needs no new or changed tests.
+    model: gpt-6-luna
+    reasoning:
+      effort: high
+    input:
+      - workflow.input.request
+      - workflow.input.resume_path?
+      - graphify_status.output?
+      - graphify_refresh.output?
+      - graphify_update_gate.output?
+      - requirements_griller.output.artifact_path?
+      - star_step.output.objective
+      - star_step.output.brief?
+    prompt: !file prompts/fast-triage.md
+    output:
+      route:
+        type: string
+        description: Exactly fast or standard.
+      reason:
+        type: string
+        description: Why the request qualifies or needs the full workflow.
+      allowed_paths:
+        type: array
+        description: Exact repository-relative files permitted for fast implementation; empty for standard.
+      acceptance_criteria:
+        type: string
+        description: Observable completion check for a fast request.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: fast-change
+  # ---------------------------------------------------------------------------
+  - name: fast_snapshot
+    type: script
+    description: Preserve the working tree before fast implementation.
+    command: python3
+    args:
+      - workflows/conductor/scripts/capture-layer-snapshot.py
+    routes:
+      - to: fast_implementor
+
+  - name: fast_implementor
+    description: Make one bounded change or return untouched to the full workflow.
+    model: gpt-6-luna
+    reasoning:
+      effort: high
+    input:
+      - workflow.input.request
+      - fast_triage.output.reason
+      - fast_triage.output.allowed_paths
+      - fast_triage.output.acceptance_criteria
+      - fast_approval_gate.output?
+      - star_step.output.objective
+      - star_step.output.brief?
+    prompt: !file prompts/fast-implementor.md
+    output:
+      needs_normal_path:
+        type: boolean
+        description: True only when the request needs tests, broader scope, or unresolved decisions.
+      summary:
+        type: string
+        description: Completed change or reason for returning to the full workflow.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: fast_change_check
+
+  - name: fast_change_check
+    type: script
+    description: Verify the fast diff is confined to triage-approved files (I4).
+    input:
+      - fast_snapshot.output.snapshot_tree
+      - fast_triage.output.allowed_paths
+    command: python3
+    args:
+      - workflows/conductor/scripts/create-layer-diff.py
+      - --snapshot-tree
+      - "{{ fast_snapshot.output.snapshot_tree }}"
+      - --allowed-paths-json
+      - "{{ fast_triage.output.allowed_paths | tojson }}"
+    routes:
+      - to: fast_verification_tests
+        when: "{{ not fast_implementor.output.needs_normal_path and fast_implementor.output.outcome == 'done' and output.boundary_status == 'passed' and output.changed_files | length > 0 }}"
+      - to: star_step
+
+  - name: fast_verification_tests
+    type: script
+    description: Run the configured test command after the fast change.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - fast-tests
+      - --command
+      - "{{ workflow.input.test_command }}"
+    timeout: 600
+    routes:
+      - to: fast_verification_lint
+
+  - name: fast_verification_lint
+    type: script
+    description: Run lint/static checks after the fast change.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - fast-lint
+      - --command
+      - "{{ workflow.input.lint_command }}"
+    timeout: 600
+    routes:
+      - to: fast_verification_security
+
+  - name: fast_verification_security
+    type: script
+    description: Run dependency/security checks after the fast change.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - fast-security
+      - --command
+      - "{{ workflow.input.security_command }}"
+    timeout: 600
+    routes:
+      - to: fast_approval_gate
+        when: "{{ fast_verification_tests.output.exit_code == 0 and fast_verification_lint.output.exit_code == 0 and output.exit_code == 0 }}"
+      - to: star_step
+
+  - name: fast_approval_gate
+    type: human_gate
+    prompt: |
+      Review the fast change and its checks.
+
+      Objective: {{ star_step.output.objective }}
+      Acceptance criterion: {{ fast_triage.output.acceptance_criteria }}
+      Files: {{ fast_change_check.output.changed_files }}
+      Change: {{ fast_implementor.output.summary }}
+      Tests/lint/security: {{ fast_verification_tests.output.exit_code }} / {{ fast_verification_lint.output.exit_code }} / {{ fast_verification_security.output.exit_code }}
+      Patch: `{{ fast_change_check.output.patch_path }}`{% if fast_change_check.output.patch_truncated %} (preview truncated){% endif %}
+
+      ```diff
+      {{ fast_change_check.output.bounded_patch }}
+      ```
+    options:
+      - label: Approve this fast change.
+        value: approve
+        route: star_step
+      - label: Request a focused fix.
+        value: fix
+        prompt_for: feedback
+        route: fast_implementor
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this run.
+        value: stop
+        route: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: slice-selection
+  # ---------------------------------------------------------------------------
+  - name: slice_selection_gate
+    type: human_gate
+    prompt: |
+      Review the generated `slice-selection.md`, then select exactly one slice.
+
+      Discovery artifact: `{{ requirements_griller.output.artifact_path }}`
+      Discovery task slug: `{{ requirements_griller.output.task_slug }}`
+      Discovery summary: {{ requirements_griller.output.summary }}
+
+      Enter the selected slice id in the gate comment; the next agent records
+      it in the artifact and creates the slice-specific requirements.
+    options:
+      - label: I selected one slice.
+        value: selected
+        prompt_for: selected_slice_and_feedback
+        route: slice_run_starter
+      - label: Revise the slice split before continuing.
+        value: revise
+        prompt_for: feedback
+        route: slice_selection_reviser
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this run.
+        value: stop
+        route: star_step
+
+  - name: slice_selection_reviser
+    description: Reconcile human feedback into the originally created slice-selection artifact.
+    model: gpt-6-sol
+    input:
+      - requirements_griller.output.artifact_path
+      - star_step.output.brief?
+    prompt: !file prompts/slice-selection-reviser.md
+    output:
+      artifact_path:
+        type: string
+        description: The same slice-selection artifact revised in place.
+      task_slug:
+        type: string
+        description: Unchanged discovery task slug.
+      blocker_count:
+        type: number
+        description: Number of unresolved blocker questions after revision.
+      summary:
+        type: string
+        description: Short summary of the revised slice split.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' }}"
+      - to: slice_selection_revision_gate
+
+  - name: slice_selection_revision_gate
+    type: human_gate
+    prompt: |
+      Review the revised slice-selection artifact. It remains the active
+      discovery artifact; no fresh discovery plan was created.
+
+      Discovery artifact: `{{ slice_selection_reviser.output.artifact_path }}`
+      Discovery task slug: `{{ slice_selection_reviser.output.task_slug }}`
+      Blocker count: {{ slice_selection_reviser.output.blocker_count }}
+      Summary: {{ slice_selection_reviser.output.summary }}
+    options:
+      - label: I selected one slice.
+        value: selected
+        prompt_for: selected_slice_and_feedback
+        route: slice_run_starter
+      - label: Revise this same slice split again.
+        value: revise
+        prompt_for: feedback
+        route: slice_selection_reviser
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this run.
+        value: stop
+        route: star_step
+
+  - name: slice_run_starter
+    description: Create the slice-specific requirements artifact.
+    model: gpt-6-sol
+    input:
+      - requirements_griller.output.artifact_path
+      - star_step.output.brief?
+    prompt: !file prompts/slice-run-starter.md
+    output:
+      artifact_path:
+        type: string
+        description: Path to the slice-specific 00-requirements.md artifact.
+      slice_slug:
+        type: string
+        description: Slug for the selected slice.
+      blockers_remaining:
+        type: boolean
+        description: True if blocker questions still need human answers.
+      summary:
+        type: string
+        description: Short summary of the selected slice.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' }}"
+      - to: slice_requirements_gate
+
+  - name: slice_requirements_gate
+    type: human_gate
+    prompt: |
+      Review the slice-specific `00-requirements.md`. Confirm the selected
+      slice goal, blockers, non-blocker assumptions, and explicitly out-of-scope
+      work. If you edited `00-requirements.md` or added feedback there, choose
+      revise so the pinned reviser can update that same artifact.
+
+      Selected slice slug: `{{ slice_run_starter.output.slice_slug }}`
+      Requirements artifact: `{{ slice_run_starter.output.artifact_path }}`
+      Blockers remaining: {{ slice_run_starter.output.blockers_remaining }}
+      Summary: {{ slice_run_starter.output.summary }}
+    options:
+      - label: Requirements are confirmed for this selected slice.
+        value: approve
+        prompt_for: feedback
+        route: star_step
+      - label: I edited or commented on requirements; revise this same artifact.
+        value: revise
+        prompt_for: feedback
+        route: slice_requirements_reviser
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this run.
+        value: stop
+        route: star_step
+
+  - name: slice_requirements_reviser
+    description: Reconcile human feedback into the selected slice requirements artifact.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - slice_run_starter.output.artifact_path
+      - star_step.output.brief?
+    prompt: !file prompts/slice-requirements-reviser.md
+    output:
+      artifact_path:
+        type: string
+        description: The same selected-slice requirements artifact revised in place.
+      blocker_count:
+        type: number
+        description: Number of unresolved blocker questions after revision.
+      summary:
+        type: string
+        description: Short human-readable summary of the revision.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' }}"
+      - to: slice_requirements_revision_gate
+
+  - name: slice_requirements_revision_gate
+    type: human_gate
+    prompt: |
+      Review the selected-slice requirements revision. This is the same
+      artifact as before; it was revised in place rather than started anew.
+
+      Requirements artifact: `{{ slice_requirements_reviser.output.artifact_path }}`
+      Blocker count: {{ slice_requirements_reviser.output.blocker_count }}
+      Summary: {{ slice_requirements_reviser.output.summary }}
+    options:
+      - label: Requirements are confirmed for this same selected slice.
+        value: approve
+        prompt_for: feedback
+        route: star_step
+      - label: I edited or commented on requirements; revise this same artifact again.
+        value: revise
+        prompt_for: feedback
+        route: slice_requirements_reviser
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this run.
+        value: stop
+        route: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: acceptance-design
+  # ---------------------------------------------------------------------------
+  - name: slice_acceptance_planner
+    description: Resolve slice acceptance design and missing support with the human before layers.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - requirements_griller.output.artifact_path
+      - slice_run_starter.output.artifact_path?
+      - workflow.input.test_command
+      - slice_acceptance_design_gate.output?
+      - slice_acceptance_validation_gate.output?
+      - star_step.output.brief?
+    prompt: !file prompts/slice-acceptance-planner.md
+    output:
+      artifact_path:
+        type: string
+        description: Exact active slice 02-slice-acceptance.json path.
+      summary:
+        type: string
+        description: Design decisions, unresolved questions and proposed support scope.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' }}"
+      - to: slice_acceptance_design_gate
+
+  - name: slice_acceptance_design_gate
+    type: human_gate
+    prompt: |
+      Review the slice Gherkin, real-system boundary, missing support, data model,
+      commands, expected test IDs and scenario coverage, determinism controls and
+      exact permitted support files.
+      Resolve every modeling/architectural question before approval. Approve
+      preservation mode only for work that introduces no observable behavior.
+      Plan: `{{ slice_acceptance_planner.output.artifact_path }}`
+      Summary: {{ slice_acceptance_planner.output.summary }}
+    options:
+      - label: Approve this concrete design and support scope; build it.
+        value: approve
+        route: star_step
+      - label: Resolve questions or revise the acceptance design.
+        value: revise
+        prompt_for: feedback
+        route: slice_acceptance_planner
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: acceptance-build
+  # ---------------------------------------------------------------------------
+  - name: slice_acceptance_prepare
+    type: script
+    description: Freeze the approved acceptance plan and snapshot all existing work.
+    input:
+      - slice_acceptance_planner.output.artifact_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/slice-acceptance.py
+      - prepare
+      - "{{ slice_acceptance_planner.output.artifact_path }}"
+    routes:
+      - to: slice_acceptance_builder
+        when: "{{ output.proceed }}"
+      - to: star_step
+
+  - name: slice_acceptance_builder
+    description: Build functional black-box acceptance and explicitly approved persistence/setup support.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - slice_acceptance_planner.output.artifact_path
+      - star_step.output.brief?
+    prompt: !file prompts/slice-acceptance-builder.md
+    output:
+      summary:
+        type: string
+        description: Actual support changes and any unresolved blockers.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' }}"
+      - to: slice_acceptance_verify
+
+  - name: slice_acceptance_verify
+    type: script
+    description: Check exact support scope, harness readiness, green regression and repeatable expected red.
+    input:
+      - slice_acceptance_prepare.output.state_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/slice-acceptance.py
+      - verify
+      - "{{ slice_acceptance_prepare.output.state_path }}"
+    timeout: 600
+    routes:
+      - to: slice_acceptance_validation_gate
+        when: "{{ output.proceed }}"
+      - to: star_step
+
+  - name: slice_acceptance_validation_gate
+    type: human_gate
+    prompt: |
+      Review the actual test, DSL, drivers, fixtures and approved persistence changes.
+      Inspect full evidence: readiness must pass; regression excludes only the
+      named outer ATs. Each expected test ID must report two failures for missing
+      product behavior. Check that each test covers its approved scenario.
+      Compilation errors, missing drivers, fabricated outcomes or environment
+      failures are blockers. Validate the real boundary and setup semantics.
+      Plan: `{{ slice_acceptance_planner.output.artifact_path }}`
+      Changed files: {{ slice_acceptance_verify.output.changed_files }}
+      Full support patch: `{{ slice_acceptance_verify.output.patch_path }}`
+      Evidence: {{ slice_acceptance_verify.output.evidence }}
+      Summary: {{ slice_acceptance_verify.output.summary }}
+    options:
+      - label: Validate the built acceptance contract and evidence; start layers.
+        value: approve
+        route: slice_acceptance_approve
+      - label: Revise design or support before starting layers.
+        value: revise
+        prompt_for: feedback
+        route: star_step
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
+  - name: slice_acceptance_approve
+    type: script
+    description: Record human validation only if the verified acceptance contract is unchanged.
+    input:
+      - slice_acceptance_prepare.output.state_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/slice-acceptance.py
+      - approve
+      - "{{ slice_acceptance_prepare.output.state_path }}"
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: layer-map
+  # ---------------------------------------------------------------------------
+  - name: layer_mapper
+    description: Map real repository boundaries and skeleton layer todos.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - slice_acceptance_planner.output.artifact_path
+      - requirements_griller.output.artifact_path
+      - slice_run_starter.output.artifact_path?
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+      - star_step.output.brief?
+    prompt: !file prompts/layer-mapper.md
+    output:
+      artifact_path:
+        type: string
+        description: Path to 01-layer-map.md.
+      layer_count:
+        type: number
+        description: Number of layers in the selected slice.
+      recommended_next_layer:
+        type: string
+        description: Recommended next layer identifier or todo filename.
+      summary:
+        type: string
+        description: Short layer map summary.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' }}"
+      - to: layer_map_gate
+
+  - name: layer_map_gate
+    type: human_gate
+    prompt: |
+      Review `01-layer-map.md` and its skeleton todos, including each layer's
+      `work_kind` (behavior, cleanup or infrastructure) and `layer_size`.
+      Approving the map is the human approval that exempts cleanup and
+      infrastructure layers from the red-test gate.
+
+      Layer map artifact: `{{ layer_mapper.output.artifact_path }}`
+      Layer count: {{ layer_mapper.output.layer_count }}
+      Recommended next layer: `{{ layer_mapper.output.recommended_next_layer }}`
+      Summary: {{ layer_mapper.output.summary }}
+    options:
+      - label: Approve this layer map.
+        value: approve
+        prompt_for: feedback
+        route: star_step
+      - label: Revise the layer map.
+        value: revise_map
+        prompt_for: feedback
+        route: layer_map_reviser
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
+  - name: layer_map_reviser
+    description: Reconcile human feedback into the active layer map.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - slice_acceptance_planner.output.artifact_path
+      - layer_mapper.output.artifact_path
+      - star_step.output.brief?
+    prompt: !file prompts/layer-map-reviser.md
+    output:
+      artifact_path:
+        type: string
+        description: The same layer-map artifact revised in place.
+      layer_count:
+        type: number
+        description: Number of layers after revision.
+      recommended_next_layer:
+        type: string
+        description: Recommended next layer identifier or todo filename.
+      summary:
+        type: string
+        description: Short layer-map revision summary.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' }}"
+      - to: layer_map_revision_gate
+
+  - name: layer_map_revision_gate
+    type: human_gate
+    prompt: |
+      Review the layer-map revision. This is the same active slice folder;
+      the map and its skeleton todos were reconciled in place.
+
+      Layer map artifact: `{{ layer_map_reviser.output.artifact_path }}`
+      Layer count: {{ layer_map_reviser.output.layer_count }}
+      Recommended next layer: `{{ layer_map_reviser.output.recommended_next_layer }}`
+      Summary: {{ layer_map_reviser.output.summary }}
+    options:
+      - label: Approve this revised layer map.
+        value: approve
+        prompt_for: feedback
+        route: star_step
+      - label: Revise this same layer map again.
+        value: revise_map
+        prompt_for: feedback
+        route: layer_map_reviser
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: layer-select
+  # ---------------------------------------------------------------------------
+  - name: layer_selection_gate
+    type: human_gate
+    prompt: |
+      Choose the next layer to run. Enter the selected layer id in the gate
+      field; the workflow records it in the layer map.
+
+      Layer map artifact: `{{ layer_mapper.output.artifact_path }}`
+      {% if cleanup_reviewer is defined and cleanup_reviewer.output is defined and cleanup_reviewer.output.recommended_next_layer is defined and cleanup_reviewer.output.recommended_next_layer %}
+      Recommended next layer: `{{ cleanup_reviewer.output.recommended_next_layer }}`
+      {% elif layer_reviewer is defined and layer_reviewer.output is defined and layer_reviewer.output.recommended_next_layer is defined and layer_reviewer.output.recommended_next_layer %}
+      Recommended next layer: `{{ layer_reviewer.output.recommended_next_layer }}`
+      {% else %}
+      Recommended next layer: `{{ layer_mapper.output.recommended_next_layer }}`
+      {% endif %}
+    options:
+      - label: I selected the next layer to run.
+        value: selected
+        prompt_for: selected_layer
+        route: layer_selection_recorder
+      - label: Revise the layer map before selecting a layer.
+        value: revise_map
+        prompt_for: feedback
+        route: star_step
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
+  - name: layer_selection_recorder
+    type: script
+    description: Persist the selected layer before generating its todo.
+    input:
+      - layer_mapper.output.artifact_path
+      - layer_selection_gate.output.additional_input.selected_layer
+    command: python3
+    args:
+      - workflows/conductor/scripts/record-layer-selection.py
+      - "{{ layer_mapper.output.artifact_path }}"
+      - "{{ layer_selection_gate.output.additional_input.selected_layer }}"
+    routes:
+      - to: selected_layer_router
+
+  - name: selected_layer_router
+    type: script
+    description: Classify the selected layer by its explicit work kind (a fact for the router).
+    input:
+      - layer_mapper.output.artifact_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/route-selected-layer.py
+      - "{{ layer_mapper.output.artifact_path }}"
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: layer-todo
+  # ---------------------------------------------------------------------------
+  - name: selected_layer_context
+    type: script
+    description: Build a bounded context projection for the selected layer todo generator.
+    input:
+      - layer_mapper.output.artifact_path
+      - star_step.output.objective
+    command: python3
+    args:
+      - workflows/conductor/scripts/build-layer-context.py
+      - --consumer
+      - todo-generator
+      - --map
+      - "{{ layer_mapper.output.artifact_path }}"
+      - --request
+      - "{{ star_step.output.objective }}"
+    routes:
+      - to: layer_todo_generator
+
+  - name: layer_todo_generator
+    description: Detail the selected layer todo with Gherkin and TDD gate state.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - selected_layer_context.output.manifest_path
+      - selected_layer_context.output.selected_layer
+      - selected_layer_context.output.layer_map_path
+      - selected_layer_context.output.todo_path
+      - selected_layer_context.output.allowed_paths
+      - selected_layer_context.output.forbidden_paths
+      - selected_layer_context.output.read_only_paths
+      - selected_layer_context.output.production_files
+      - selected_layer_context.output.test_files
+      - selected_layer_context.output.source_context
+      - selected_layer_context.output.source_context_bytes
+      - selected_layer_context.output.source_context_truncated
+      - selected_layer_context.output.layer_map_excerpt
+      - selected_layer_context.output.layer_contract
+      - selected_layer_context.output.request_contract
+      - selected_layer_context.output.request_contract_truncated
+      - selected_layer_context.output.source_fingerprint
+      - slice_acceptance_prepare.output.regression_command
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+      - star_step.output.brief?
+    prompt: !file prompts/layer-todo-generator.md
+    output:
+      artifact_path:
+        type: string
+        description: Path to the selected layer todo.
+      selected_layer:
+        type: string
+        description: Selected layer identifier.
+      test_ownership:
+        type: string
+        description: human-written, agent-written-after-approval, or waived.
+      red_gate_state:
+        type: string
+        description: observed-red, not-run-human-approved, already-passing-human-approved, waived, or blocked.
+      ready_for_implementation:
+        type: boolean
+        description: True only when the layer has an allowed red-test gate state.
+      summary:
+        type: string
+        description: Short summary of the layer todo.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' }}"
+      - to: layer_todo_gate
+
+  - name: layer_todo_gate
+    type: human_gate
+    prompt: |
+      Review the selected layer todo, including `layer_size`. Approve the Gherkin and test ownership.
+      The workflow then runs the approved regression suite as the deterministic
+      red-test check before production implementation; only the named outer AT is excluded.
+      Infrastructure layers approved in the layer map may skip the red-test gate.
+
+      Selected layer: `{{ layer_todo_generator.output.selected_layer }}`
+      Layer todo artifact: `{{ layer_todo_generator.output.artifact_path }}`
+      Test ownership: `{{ layer_todo_generator.output.test_ownership }}`
+      Red-test gate state: `{{ layer_todo_generator.output.red_gate_state }}`
+      Ready for implementation: {{ layer_todo_generator.output.ready_for_implementation }}
+      Summary: {{ layer_todo_generator.output.summary }}
+    options:
+      - label: Gherkin is approved; have the agent author the top-level test.
+        value: author_agent_test
+        prompt_for: feedback
+        route: star_step
+      - label: Gherkin is approved; verify the existing top-level test with the full suite.
+        value: verify_existing_test
+        prompt_for: feedback
+        route: star_step
+      - label: Infrastructure layer approved in the map; implement without a new test.
+        value: approve_infrastructure
+        prompt_for: feedback
+        route: star_step
+      - label: Revise the layer todo or gate state.
+        value: revise
+        prompt_for: feedback
+        route: layer_todo_reviser
+      - label: Go back to layer selection.
+        value: select_other_layer
+        route: star_step
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
+  - name: layer_todo_reviser
+    description: Reconcile human or checkpoint feedback into the active layer todo.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - layer_todo_generator.output.artifact_path
+      - layer_todo_gate.output?
+      - layer_todo_revision_gate.output?
+      - red_suite_evidence_gate.output?
+      - star_step.output.brief?
+    prompt: !file prompts/layer-todo-reviser.md
+    output:
+      artifact_path:
+        type: string
+        description: The same layer todo revised in place.
+      selected_layer:
+        type: string
+        description: Unchanged selected layer identifier.
+      test_ownership:
+        type: string
+        description: human-written, agent-written-after-approval, or waived.
+      red_gate_state:
+        type: string
+        description: Red-test gate state after revision.
+      ready_for_implementation:
+        type: boolean
+        description: True only when the revised todo has an allowed red-test state.
+      summary:
+        type: string
+        description: Short layer-todo revision summary.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' }}"
+      - to: layer_todo_revision_gate
+
+  - name: layer_todo_revision_gate
+    type: human_gate
+    prompt: |
+      Review the layer-todo revision. This is the same active todo, revised in
+      place; it is not a new layer or a new plan folder.
+
+      Selected layer: `{{ layer_todo_reviser.output.selected_layer }}`
+      Layer todo artifact: `{{ layer_todo_reviser.output.artifact_path }}`
+      Test ownership: `{{ layer_todo_reviser.output.test_ownership }}`
+      Red-test gate state: `{{ layer_todo_reviser.output.red_gate_state }}`
+      Ready for implementation: {{ layer_todo_reviser.output.ready_for_implementation }}
+      Summary: {{ layer_todo_reviser.output.summary }}
+    options:
+      - label: Gherkin is approved; have the agent author the top-level test.
+        value: author_agent_test
+        prompt_for: feedback
+        route: star_step
+      - label: Gherkin is approved; verify the existing top-level test with the full suite.
+        value: verify_existing_test
+        prompt_for: feedback
+        route: star_step
+      - label: Infrastructure layer approved in the map; implement without a new test.
+        value: approve_infrastructure
+        prompt_for: feedback
+        route: star_step
+      - label: Revise this same layer todo or gate state again.
+        value: revise
+        prompt_for: feedback
+        route: layer_todo_reviser
+      - label: Go back to layer selection.
+        value: select_other_layer
+        route: star_step
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: test-author
+  # ---------------------------------------------------------------------------
+  - name: test_author_preparer
+    type: script
+    description: Record the approved handoff and mark only top-level test tasks in progress.
+    input:
+      - layer_todo_generator.output.artifact_path
+      - layer_todo_gate.output.additional_input.feedback?
+      - layer_todo_revision_gate.output?
+    command: python3
+    args:
+      - workflows/conductor/scripts/record-test-author.py
+      - prepare
+      - --artifact
+      - "{{ layer_todo_generator.output.artifact_path }}"
+      - --feedback
+      - >-
+        {% if layer_todo_revision_gate is defined and layer_todo_revision_gate.output is defined %}{{ layer_todo_revision_gate.output.additional_input.feedback | default("") }}{% else %}{{ layer_todo_gate.output.additional_input.feedback | default("") }}{% endif %}
+    routes:
+      - to: test_author_context
+        when: "{{ output.proceed }}"
+      - to: star_step
+
+  - name: test_author_context
+    type: script
+    description: Build a narrow context projection after the approved handoff is recorded.
+    input:
+      - layer_todo_generator.output.artifact_path
+      - star_step.output.objective
+    command: python3
+    args:
+      - workflows/conductor/scripts/build-layer-context.py
+      - --consumer
+      - test-author
+      - --todo
+      - "{{ layer_todo_generator.output.artifact_path }}"
+      - --request
+      - "{{ star_step.output.objective }}"
+    routes:
+      - to: test_author_snapshot
+
+  - name: test_author_snapshot
+    type: script
+    description: Capture the exact tree after deterministic handoff state and before test authoring.
+    command: python3
+    args:
+      - workflows/conductor/scripts/capture-layer-snapshot.py
+    routes:
+      - to: agent_test_author
+
+  - name: agent_test_author
+    description: Author the approved top-level test without changing production code.
+    model: "{{ 'gpt-6-luna' if star_step.output.model_tier == 'small' else 'claude-sonnet-5.5' }}"
+    input:
+      - test_author_context.output.manifest_path
+      - test_author_context.output.layer_size
+      - test_author_context.output.selected_layer
+      - test_author_context.output.layer_map_path
+      - test_author_context.output.todo_path
+      - test_author_context.output.allowed_paths
+      - test_author_context.output.forbidden_paths
+      - test_author_context.output.read_only_paths
+      - test_author_context.output.production_files
+      - test_author_context.output.test_files
+      - test_author_context.output.repository_skill_paths
+      - test_author_context.output.source_context
+      - test_author_context.output.source_context_bytes
+      - test_author_context.output.source_context_truncated
+      - test_author_context.output.layer_contract
+      - test_author_context.output.request_contract
+      - test_author_context.output.request_contract_truncated
+      - test_author_context.output.source_fingerprint
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output?
+      - star_step.output.model_tier
+      - star_step.output.reasoning_effort
+      - star_step.output.brief?
+    reasoning:
+      effort: "{{ star_step.output.reasoning_effort }}"
+    prompt: !file prompts/agent-test-author.md
+    output:
+      selected_layer:
+        type: string
+        description: Layer whose approved top-level test was authored.
+      test_files_modified:
+        type: array
+        description: Top-level test files created or changed; production files are excluded.
+      checkpoint_required:
+        type: boolean
+        description: True when authoring the approved test exposed new top-level behavior or a contradiction.
+      checkpoint_summary:
+        type: string
+        description: Checkpoint details if human routing is required.
+      summary:
+        type: string
+        description: Test-authoring summary with no production implementation.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: test_author_completion_recorder
+
+  - name: test_author_completion_recorder
+    type: script
+    description: Validate test-only changes (I5) and mark only approved test tasks complete.
+    input:
+      - test_author_context.output.todo_path
+      - test_author_context.output.manifest_path
+      - test_author_snapshot.output.snapshot_tree
+      - agent_test_author.output.test_files_modified
+      - agent_test_author.output.checkpoint_required
+    command: python3
+    args:
+      - workflows/conductor/scripts/record-test-author.py
+      - complete
+      - --artifact
+      - "{{ test_author_context.output.todo_path }}"
+      - --manifest
+      - "{{ test_author_context.output.manifest_path }}"
+      - --snapshot-tree
+      - "{{ test_author_snapshot.output.snapshot_tree }}"
+      - --reported-files
+      - "{{ agent_test_author.output.test_files_modified | json }}"
+      - --checkpoint-required
+      - "{{ 'true' if agent_test_author.output.checkpoint_required else 'false' }}"
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: red-gate
+  # ---------------------------------------------------------------------------
+  - name: red_suite_verifier
+    type: script
+    description: Run approved layer regression and emit bounded expected-red evidence without failing the workflow.
+    input:
+      - slice_acceptance_prepare.output.regression_command
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - red-suite
+      - --command
+      - "{{ slice_acceptance_prepare.output.regression_command }}"
+    timeout: 600
+    routes:
+      - to: red_suite_evidence_recorder
+
+  - name: red_suite_evidence_recorder
+    type: script
+    description: Persist full-suite red-gate evidence in the active layer todo.
+    input:
+      - layer_todo_generator.output.artifact_path
+      - red_suite_verifier.output.evidence_path
+      - red_suite_verifier.output.exit_code
+      - red_suite_verifier.output.output_bytes
+      - red_suite_verifier.output.bounded_excerpt
+      - slice_acceptance_prepare.output.regression_command
+    command: python3
+    args:
+      - workflows/conductor/scripts/record-red-gate.py
+      - evidence
+      - --artifact
+      - "{{ layer_todo_generator.output.artifact_path }}"
+      - --command
+      - "{{ slice_acceptance_prepare.output.regression_command }}"
+      - --exit-code
+      - "{{ red_suite_verifier.output.exit_code }}"
+      - --evidence-path
+      - "{{ red_suite_verifier.output.evidence_path }}"
+      - --output-bytes
+      - "{{ red_suite_verifier.output.output_bytes }}"
+      - --excerpt
+      - "{{ red_suite_verifier.output.bounded_excerpt }}"
+    routes:
+      - to: red_suite_evidence_gate
+
+  - name: red_suite_evidence_gate
+    type: human_gate
+    prompt: |
+      Review the deterministic full-suite result before any production work.
+      The decision and optional comment below are written to the active todo
+      automatically; do not edit frontmatter or a dashboard by hand.
+
+      Active layer todo: `{{ layer_todo_generator.output.artifact_path }}`
+      Regression command: `{{ slice_acceptance_prepare.output.regression_command }}`
+      Exit code: {{ red_suite_verifier.output.exit_code }}
+      Evidence: `{{ red_suite_verifier.output.evidence_path }}`
+      Summary: {{ red_suite_evidence_recorder.output.summary }}
+    options:
+      - label: The full-suite failure is the expected red evidence; implement.
+        value: confirm_red
+        prompt_for: feedback
+        route: red_gate_decision_recorder
+      - label: The full suite is green; accept the existing coverage and implement.
+        value: accept_green
+        prompt_for: feedback
+        route: red_gate_decision_recorder
+      - label: Revise the same layer todo or test contract.
+        value: revise
+        prompt_for: feedback
+        route: star_step
+      - label: Go back to layer selection.
+        value: select_other_layer
+        route: star_step
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
+  - name: red_gate_decision_recorder
+    type: script
+    description: Persist the human red-gate decision; the router allows implementation only when it proceeds.
+    input:
+      - layer_todo_generator.output.artifact_path
+      - red_suite_verifier.output.evidence_path
+      - red_suite_verifier.output.exit_code
+      - red_suite_evidence_gate.output.selected
+      - red_suite_evidence_gate.output.additional_input.feedback?
+      - slice_acceptance_prepare.output.regression_command
+    command: python3
+    args:
+      - workflows/conductor/scripts/record-red-gate.py
+      - decision
+      - --artifact
+      - "{{ layer_todo_generator.output.artifact_path }}"
+      - --selection
+      - "{{ red_suite_evidence_gate.output.selected }}"
+      - --feedback
+      - '{{ red_suite_evidence_gate.output.additional_input.feedback | default("") }}'
+      - --command
+      - "{{ slice_acceptance_prepare.output.regression_command }}"
+      - --exit-code
+      - "{{ red_suite_verifier.output.exit_code }}"
+      - --evidence-path
+      - "{{ red_suite_verifier.output.evidence_path }}"
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: implement
+  # ---------------------------------------------------------------------------
+  - name: implementation_context
+    type: script
+    description: Refresh the bounded context projection immediately before implementation.
+    input:
+      - layer_todo_generator.output.artifact_path
+      - star_step.output.objective
+    command: python3
+    args:
+      - workflows/conductor/scripts/build-layer-context.py
+      - --consumer
+      - implementor
+      - --todo
+      - "{{ layer_todo_generator.output.artifact_path }}"
+      - --request
+      - "{{ star_step.output.objective }}"
+    routes:
+      - to: layer_snapshot
+
+  - name: layer_snapshot
+    type: script
+    description: Capture the exact working tree immediately before this layer is implemented.
+    command: python3
+    args:
+      - workflows/conductor/scripts/capture-layer-snapshot.py
+    routes:
+      - to: implementor
+
+  - name: implementor
+    description: Implement only inside the approved layer boundary.
+    model: "{{ 'gpt-6-luna' if star_step.output.model_tier == 'small' else 'claude-sonnet-5.5' }}"
+    reasoning:
+      effort: "{{ star_step.output.reasoning_effort }}"
+    input:
+      - implementation_context.output.manifest_path
+      - implementation_context.output.layer_size
+      - implementation_context.output.selected_layer
+      - implementation_context.output.layer_map_path
+      - implementation_context.output.todo_path
+      - implementation_context.output.allowed_paths
+      - implementation_context.output.forbidden_paths
+      - implementation_context.output.read_only_paths
+      - implementation_context.output.production_files
+      - implementation_context.output.test_files
+      - implementation_context.output.source_context
+      - implementation_context.output.source_context_bytes
+      - implementation_context.output.source_context_truncated
+      - implementation_context.output.layer_contract
+      - implementation_context.output.request_contract
+      - implementation_context.output.request_contract_truncated
+      - implementation_context.output.source_fingerprint
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+      - star_step.output.model_tier
+      - star_step.output.reasoning_effort
+      - star_step.output.brief?
+    prompt: !file prompts/implementor.md
+    output:
+      selected_layer:
+        type: string
+        description: Layer implemented.
+      files_modified:
+        type: array
+        description: Files created or changed.
+      checkpoint_required:
+        type: boolean
+        description: True when new top-level behavior or contradiction was found.
+      checkpoint_summary:
+        type: string
+        description: Checkpoint details if human routing is required.
+      summary:
+        type: string
+        description: Implementation summary.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: verify
+  # ---------------------------------------------------------------------------
+  - name: verification_tests
+    type: script
+    description: Run the configured test command and retain complete evidence outside the reviewer prompt.
+    input:
+      - slice_acceptance_prepare.output.regression_command
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - verification-tests
+      - --command
+      - "{{ slice_acceptance_prepare.output.regression_command }}"
+    timeout: 600
+    routes:
+      - to: verification_lint
+
+  - name: verification_lint
+    type: script
+    description: Run lint/static checks and retain complete evidence outside the reviewer prompt.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - verification-lint
+      - --command
+      - "{{ workflow.input.lint_command }}"
+    timeout: 600
+    routes:
+      - to: verification_security
+
+  - name: verification_security
+    type: script
+    description: Run dependency/CVE checks and retain complete evidence outside the reviewer prompt.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - verification-security
+      - --command
+      - "{{ workflow.input.security_command }}"
+    timeout: 600
+    routes:
+      - to: layer_diff
+
+  - name: layer_diff
+    type: script
+    description: Build a bounded layer-only patch and classify changed paths against the approved boundary.
+    input:
+      - layer_snapshot.output.snapshot_tree
+      - layer_todo_generator.output.artifact_path
+      - star_step.output.ledger_sha
+    command: python3
+    args:
+      - workflows/conductor/scripts/create-layer-diff.py
+      - --snapshot-tree
+      - "{{ layer_snapshot.output.snapshot_tree }}"
+      - --todo
+      - "{{ layer_todo_generator.output.artifact_path }}"
+      - --ledger-sha
+      - "{{ star_step.output.ledger_sha }}"
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: layer-review
+  # ---------------------------------------------------------------------------
+  - name: layer_reviewer
+    description: Review one completed layer and record risks or gaps.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - layer_todo_generator.output.artifact_path
+      - verification_tests.output.exit_code
+      - verification_tests.output.duration_ms
+      - verification_tests.output.passed_count
+      - verification_tests.output.failed_count
+      - verification_tests.output.failed_test_names
+      - verification_tests.output.bounded_excerpt
+      - verification_tests.output.evidence_path
+      - verification_tests.output.output_bytes
+      - verification_tests.output.summary_truncated
+      - verification_lint.output.exit_code
+      - verification_lint.output.duration_ms
+      - verification_lint.output.passed_count
+      - verification_lint.output.failed_count
+      - verification_lint.output.failed_test_names
+      - verification_lint.output.bounded_excerpt
+      - verification_lint.output.evidence_path
+      - verification_lint.output.output_bytes
+      - verification_lint.output.summary_truncated
+      - verification_security.output.exit_code
+      - verification_security.output.duration_ms
+      - verification_security.output.passed_count
+      - verification_security.output.failed_count
+      - verification_security.output.failed_test_names
+      - verification_security.output.bounded_excerpt
+      - verification_security.output.evidence_path
+      - verification_security.output.output_bytes
+      - verification_security.output.summary_truncated
+      - layer_diff.output.changed_files
+      - layer_diff.output.bounded_patch
+      - layer_diff.output.patch_path
+      - layer_diff.output.patch_bytes
+      - layer_diff.output.patch_truncated
+      - layer_diff.output.boundary_status
+      - layer_diff.output.boundary_violations
+      - layer_diff.output.allowed_paths
+      - layer_diff.output.forbidden_paths
+      - layer_diff.output.boundary_exempt_paths
+      - implementation_context.output.request_contract
+      - slice_acceptance_prepare.output.regression_command
+      - workflow.input.lint_command
+      - workflow.input.security_command
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+      - star_step.output.brief?
+    prompt: !file prompts/layer-reviewer.md
+    output:
+      artifact_path:
+        type: string
+        description: Path updated by the layer review.
+      approved_recommendation:
+        type: boolean
+        description: Whether the reviewer recommends human approval.
+      more_layers_remaining:
+        type: boolean
+        description: Whether unfinished layers remain.
+      recommended_next_layer:
+        type: string
+        description: First eligible unfinished layer after the reviewed layer, or empty when none remain.
+      issues:
+        type: array
+        description: Specific issues, risks, or verification gaps.
+      summary:
+        type: string
+        description: Layer review summary.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' }}"
+      - to: layer_approval_gate
+
+  - name: layer_approval_gate
+    type: human_gate
+    prompt: |
+      Review the layer result and the reviewer notes. Approve the layer, request
+      a focused fix, select another layer, or finish the slice.
+
+      Implemented layer: `{{ implementor.output.selected_layer }}`
+      Reviewed artifact: `{{ layer_reviewer.output.artifact_path }}`
+      Approval recommended: {{ layer_reviewer.output.approved_recommendation }}
+      More layers remaining: {{ layer_reviewer.output.more_layers_remaining }}
+      Review issues: {{ layer_reviewer.output.issues }}
+      Summary: {{ layer_reviewer.output.summary }}
+    options:
+      - label: Approve this layer and choose another layer.
+        value: approve_more_layers
+        prompt_for: feedback
+        route: star_step
+      - label: Approve this layer and run final slice review.
+        value: approve_final_review
+        prompt_for: feedback
+        route: star_step
+      - label: Send the layer back to the implementor for focused fixes.
+        value: request_fixes
+        prompt_for: feedback
+        route: star_step
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: cleanup-plan
+  # ---------------------------------------------------------------------------
+  - name: cleanup_plan_context
+    type: script
+    description: Build a bounded context projection for the selected cleanup planner.
+    input:
+      - layer_mapper.output.artifact_path
+      - star_step.output.objective
+    command: python3
+    args:
+      - workflows/conductor/scripts/build-layer-context.py
+      - --consumer
+      - cleanup-planner
+      - --map
+      - "{{ layer_mapper.output.artifact_path }}"
+      - --request
+      - "{{ star_step.output.objective }}"
+    routes:
+      - to: cleanup_planner
+
+  - name: cleanup_planner
+    description: Detail one removal-only supersession chain without creating a red-test contract.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - cleanup_plan_context.output.manifest_path
+      - cleanup_plan_context.output.selected_layer
+      - cleanup_plan_context.output.todo_path
+      - cleanup_plan_context.output.allowed_paths
+      - cleanup_plan_context.output.forbidden_paths
+      - cleanup_plan_context.output.read_only_paths
+      - cleanup_plan_context.output.source_context
+      - cleanup_plan_context.output.layer_contract
+      - cleanup_plan_context.output.request_contract
+      - cleanup_plan_context.output.source_fingerprint
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+      - star_step.output.brief?
+    prompt: !file prompts/cleanup-planner.md
+    output:
+      artifact_path:
+        type: string
+      selected_layer:
+        type: string
+      ready_for_cleanup:
+        type: boolean
+      blockers:
+        type: array
+      removal_targets:
+        type: array
+      summary:
+        type: string
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: cleanup_plan_gate
+        when: "{{ output.outcome == 'done' and output.ready_for_cleanup }}"
+      - to: star_step
+
+  - name: cleanup_plan_gate
+    type: human_gate
+    prompt: |
+      Review the cleanup plan. Cleanup skips test authoring and the expected-red
+      gate; safety comes from existing behavior tests, a green baseline, exact
+      removal/reference checks, bounded changes, post-cleanup verification, and review.
+
+      Selected layer: `{{ cleanup_planner.output.selected_layer }}`
+      Cleanup todo: `{{ cleanup_planner.output.artifact_path }}`
+      Ready for cleanup: {{ cleanup_planner.output.ready_for_cleanup }}
+      Blockers: {{ cleanup_planner.output.blockers }}
+      Removal targets: {{ cleanup_planner.output.removal_targets }}
+      Summary: {{ cleanup_planner.output.summary }}
+    options:
+      - label: Approve this cleanup plan and run the green baseline.
+        value: approve_cleanup
+        prompt_for: feedback
+        route: cleanup_plan_validator
+      - label: Revise this same cleanup plan.
+        value: revise
+        prompt_for: feedback
+        route: cleanup_plan_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: star_step
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
+  - name: cleanup_plan_reviser
+    description: Reconcile human feedback into the same cleanup plan.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - cleanup_planner.output.artifact_path
+      - cleanup_plan_gate.output.additional_input.feedback?
+      - cleanup_plan_revision_gate.output.additional_input.feedback?
+      - cleanup_approval_gate.output.additional_input.feedback?
+      - star_step.output.brief?
+    prompt: !file prompts/cleanup-plan-reviser.md
+    output:
+      artifact_path:
+        type: string
+      selected_layer:
+        type: string
+      ready_for_cleanup:
+        type: boolean
+      blockers:
+        type: array
+      removal_targets:
+        type: array
+      summary:
+        type: string
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: cleanup_plan_revision_gate
+        when: "{{ output.outcome == 'done' and output.ready_for_cleanup }}"
+      - to: star_step
+
+  - name: cleanup_plan_revision_gate
+    type: human_gate
+    prompt: |
+      Review the revised cleanup plan. It remains the same selected cleanup
+      layer and must not contain observable behavior changes.
+
+      Selected layer: `{{ cleanup_plan_reviser.output.selected_layer }}`
+      Cleanup todo: `{{ cleanup_plan_reviser.output.artifact_path }}`
+      Ready for cleanup: {{ cleanup_plan_reviser.output.ready_for_cleanup }}
+      Blockers: {{ cleanup_plan_reviser.output.blockers }}
+      Removal targets: {{ cleanup_plan_reviser.output.removal_targets }}
+      Summary: {{ cleanup_plan_reviser.output.summary }}
+    options:
+      - label: Approve this cleanup plan and run the green baseline.
+        value: approve_cleanup
+        prompt_for: feedback
+        route: cleanup_plan_validator
+      - label: Revise this same cleanup plan again.
+        value: revise
+        prompt_for: feedback
+        route: cleanup_plan_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: star_step
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
+  - name: cleanup_plan_validator
+    type: script
+    description: Fail closed when the approved cleanup artifact lacks its required bounded contract.
+    input:
+      - cleanup_plan_context.output.todo_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/check-cleanup-result.py
+      - --todo
+      - "{{ cleanup_plan_context.output.todo_path }}"
+      - --plan-only
+    routes:
+      - to: cleanup_baseline_tests
+        when: "{{ output.passed }}"
+      - to: star_step
+
+  - name: cleanup_baseline_tests
+    type: script
+    description: Confirm the behavior suite is green immediately before cleanup.
+    input:
+      - slice_acceptance_prepare.output.regression_command
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - cleanup-baseline-tests
+      - --command
+      - "{{ slice_acceptance_prepare.output.regression_command }}"
+    timeout: 600
+    routes:
+      - to: cleanup_baseline_lint
+
+  - name: cleanup_baseline_lint
+    type: script
+    description: Confirm lint/static checks are green immediately before cleanup.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - cleanup-baseline-lint
+      - --command
+      - "{{ workflow.input.lint_command }}"
+    timeout: 600
+    routes:
+      - to: cleanup_baseline_security
+
+  - name: cleanup_baseline_security
+    type: script
+    description: Confirm dependency/security checks are green immediately before cleanup.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - cleanup-baseline-security
+      - --command
+      - "{{ workflow.input.security_command }}"
+    timeout: 600
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: cleanup-implement
+  # ---------------------------------------------------------------------------
+  - name: cleanup_implementation_context
+    type: script
+    description: Refresh the bounded cleanup projection immediately before removal.
+    input:
+      - layer_mapper.output.artifact_path
+      - star_step.output.objective
+    command: python3
+    args:
+      - workflows/conductor/scripts/build-layer-context.py
+      - --consumer
+      - cleanup-implementor
+      - --map
+      - "{{ layer_mapper.output.artifact_path }}"
+      - --request
+      - "{{ star_step.output.objective }}"
+    routes:
+      - to: cleanup_layer_snapshot
+
+  - name: cleanup_layer_snapshot
+    type: script
+    description: Capture the exact working tree immediately before cleanup.
+    command: python3
+    args:
+      - workflows/conductor/scripts/capture-layer-snapshot.py
+    routes:
+      - to: cleanup_implementor
+
+  - name: cleanup_implementor
+    description: Remove only the approved private supersession chain.
+    model: "{{ 'gpt-6-luna' if star_step.output.model_tier == 'small' else 'claude-sonnet-5.5' }}"
+    reasoning:
+      effort: "{{ star_step.output.reasoning_effort }}"
+    input:
+      - cleanup_implementation_context.output.manifest_path
+      - cleanup_implementation_context.output.layer_size
+      - cleanup_implementation_context.output.selected_layer
+      - cleanup_implementation_context.output.todo_path
+      - cleanup_implementation_context.output.allowed_paths
+      - cleanup_implementation_context.output.forbidden_paths
+      - cleanup_implementation_context.output.read_only_paths
+      - cleanup_implementation_context.output.source_context
+      - cleanup_implementation_context.output.layer_contract
+      - cleanup_implementation_context.output.request_contract
+      - cleanup_implementation_context.output.source_fingerprint
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+      - star_step.output.model_tier
+      - star_step.output.reasoning_effort
+      - star_step.output.brief?
+    prompt: !file prompts/cleanup-implementor.md
+    output:
+      selected_layer:
+        type: string
+      files_removed:
+        type: array
+      tests_removed:
+        type: array
+      files_modified:
+        type: array
+      checkpoint_required:
+        type: boolean
+      checkpoint_summary:
+        type: string
+      summary:
+        type: string
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: cleanup-verify
+  # ---------------------------------------------------------------------------
+  - name: cleanup_verification_tests
+    type: script
+    description: Run behavior tests after cleanup and retain complete evidence by path.
+    input:
+      - slice_acceptance_prepare.output.regression_command
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - cleanup-verification-tests
+      - --command
+      - "{{ slice_acceptance_prepare.output.regression_command }}"
+    timeout: 600
+    routes:
+      - to: cleanup_verification_lint
+
+  - name: cleanup_verification_lint
+    type: script
+    description: Run lint/static checks after cleanup and retain complete evidence by path.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - cleanup-verification-lint
+      - --command
+      - "{{ workflow.input.lint_command }}"
+    timeout: 600
+    routes:
+      - to: cleanup_verification_security
+
+  - name: cleanup_verification_security
+    type: script
+    description: Run dependency/security checks after cleanup and retain complete evidence by path.
+    command: python3
+    args:
+      - workflows/conductor/scripts/run-verification.py
+      - --kind
+      - cleanup-verification-security
+      - --command
+      - "{{ workflow.input.security_command }}"
+    timeout: 600
+    routes:
+      - to: cleanup_result_check
+
+  - name: cleanup_result_check
+    type: script
+    description: Verify declared removal targets and bounded fixed-string references are absent.
+    input:
+      - cleanup_implementation_context.output.todo_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/check-cleanup-result.py
+      - --todo
+      - "{{ cleanup_implementation_context.output.todo_path }}"
+    routes:
+      - to: cleanup_layer_diff
+
+  - name: cleanup_layer_diff
+    type: script
+    description: Build a bounded cleanup-only patch and classify its boundary.
+    input:
+      - cleanup_layer_snapshot.output.snapshot_tree
+      - cleanup_implementation_context.output.todo_path
+      - star_step.output.ledger_sha
+    command: python3
+    args:
+      - workflows/conductor/scripts/create-layer-diff.py
+      - --snapshot-tree
+      - "{{ cleanup_layer_snapshot.output.snapshot_tree }}"
+      - --todo
+      - "{{ cleanup_implementation_context.output.todo_path }}"
+      - --ledger-sha
+      - "{{ star_step.output.ledger_sha }}"
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: cleanup-review
+  # ---------------------------------------------------------------------------
+  - name: cleanup_reviewer
+    description: Review one completed cleanup layer without inventing absence tests.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - layer_mapper.output.artifact_path
+      - cleanup_implementation_context.output.todo_path
+      - cleanup_implementation_context.output.request_contract
+      - cleanup_baseline_tests.output.exit_code
+      - cleanup_baseline_lint.output.exit_code
+      - cleanup_baseline_security.output.exit_code
+      - cleanup_verification_tests.output.exit_code
+      - cleanup_verification_tests.output.duration_ms
+      - cleanup_verification_tests.output.passed_count
+      - cleanup_verification_tests.output.failed_count
+      - cleanup_verification_tests.output.failed_test_names
+      - cleanup_verification_tests.output.bounded_excerpt
+      - cleanup_verification_tests.output.evidence_path
+      - cleanup_verification_lint.output.exit_code
+      - cleanup_verification_lint.output.bounded_excerpt
+      - cleanup_verification_lint.output.evidence_path
+      - cleanup_verification_security.output.exit_code
+      - cleanup_verification_security.output.bounded_excerpt
+      - cleanup_verification_security.output.evidence_path
+      - cleanup_result_check.output.passed
+      - cleanup_result_check.output.remaining_targets
+      - cleanup_result_check.output.remaining_references
+      - cleanup_result_check.output.errors
+      - cleanup_layer_diff.output.changed_files
+      - cleanup_layer_diff.output.bounded_patch
+      - cleanup_layer_diff.output.patch_path
+      - cleanup_layer_diff.output.patch_truncated
+      - cleanup_layer_diff.output.boundary_status
+      - cleanup_layer_diff.output.boundary_violations
+      - graphify_status.output.graph_available?
+      - graphify_refresh.output.graph_available?
+      - star_step.output.brief?
+    prompt: !file prompts/cleanup-reviewer.md
+    output:
+      artifact_path:
+        type: string
+      approved_recommendation:
+        type: boolean
+      more_layers_remaining:
+        type: boolean
+      recommended_next_layer:
+        type: string
+      issues:
+        type: array
+      summary:
+        type: string
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+        when: "{{ output.outcome != 'done' }}"
+      - to: cleanup_approval_gate
+
+  - name: cleanup_approval_gate
+    type: human_gate
+    prompt: |
+      Review the cleanup result and reviewer notes.
+
+      Cleaned layer: `{{ cleanup_implementor.output.selected_layer }}`
+      Reviewed artifact: `{{ cleanup_reviewer.output.artifact_path }}`
+      Approval recommended: {{ cleanup_reviewer.output.approved_recommendation }}
+      More layers remaining: {{ cleanup_reviewer.output.more_layers_remaining }}
+      Review issues: {{ cleanup_reviewer.output.issues }}
+      Summary: {{ cleanup_reviewer.output.summary }}
+    options:
+      - label: Approve this cleanup and choose another layer.
+        value: approve_more_layers
+        prompt_for: feedback
+        route: star_step
+      - label: Approve this cleanup and run final slice review.
+        value: approve_final_review
+        prompt_for: feedback
+        route: star_step
+      - label: Send this cleanup back for focused removal fixes.
+        value: request_fixes
+        prompt_for: feedback
+        route: star_step
+      - label: Revise the cleanup plan because its contract changed.
+        value: revise_plan
+        prompt_for: feedback
+        route: star_step
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: final
+  # ---------------------------------------------------------------------------
+  - name: slice_acceptance_final
+    type: script
+    description: Require unchanged approved support and green real slice acceptance before final review.
+    input:
+      - slice_acceptance_prepare.output.state_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/slice-acceptance.py
+      - final
+      - "{{ slice_acceptance_prepare.output.state_path }}"
+    timeout: 600
+    routes:
+      - to: final_reviewer
+        when: "{{ output.proceed }}"
+      - to: star_step
+
+  - name: final_reviewer
+    description: Review the whole selected slice and propose memory candidates.
+    model: gpt-6-sol
+    reasoning:
+      effort: high
+    input:
+      - slice_acceptance_final.output
+      - slice_acceptance_planner.output.artifact_path
+      - layer_mapper.output.artifact_path
+      - star_step.output.brief?
+    prompt: !file prompts/final-reviewer.md
+    output:
+      artifact_path:
+        type: string
+        description: Path to 99-final-review.md.
+      memory_candidates:
+        type: array
+        description: Proposed memory candidates.
+      residual_risks:
+        type: array
+        description: Residual risks or verification gaps.
+      ready_to_finish:
+        type: boolean
+        description: Whether the slice is ready to finish.
+      summary:
+        type: string
+        description: Final review summary.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Spoke: memory
+  # ---------------------------------------------------------------------------
+  - name: memory_gate
+    type: human_gate
+    prompt: |
+      Review `99-final-review.md`. Approve only the memory candidates worth
+      capturing with the repository's existing memory workflow.
+
+      Final review artifact: `{{ final_reviewer.output.artifact_path }}`
+      Ready to finish: {{ final_reviewer.output.ready_to_finish }}
+      Residual risks: {{ final_reviewer.output.residual_risks }}
+      Memory candidates: {{ final_reviewer.output.memory_candidates }}
+      Summary: {{ final_reviewer.output.summary }}
+    options:
+      - label: Capture approved memory candidates separately.
+        value: capture
+        prompt_for: feedback
+        route: memory_capturer
+      - label: Finish without memory capture.
+        value: skip
+        prompt_for: feedback
+        route: star_step
+      - label: Revise the final review first.
+        value: revise_review
+        prompt_for: feedback
+        route: star_step
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+
+  - name: memory_capturer
+    description: Persist human-approved memory candidates from the final review.
+    model: gpt-6-luna
+    reasoning:
+      effort: low
+    input:
+      - final_reviewer.output.artifact_path
+      - layer_mapper.output.artifact_path
+      - workflow.input.memory_vault?
+      - workflow.input.memory_namespace?
+      - workflow.input.memory_project?
+      - star_step.output.brief?
+    prompt: !file prompts/memory-capturer.md
+    output:
+      artifact_path:
+        type: string
+        description: Path to the final review artifact that was processed.
+      captured_count:
+        type: number
+        description: Number of memory candidates captured or staged.
+      capture_backend:
+        type: string
+        description: Memory backend used, either markdown or unavailable.
+      capture_artifacts:
+        type: array
+        description: Observation IDs, topic keys, or markdown files written.
+      summary:
+        type: string
+        description: Short memory capture summary.
+      outcome:
+        type: string
+        enum: [done, blocked, needs-human, incoherence]
+      reason:
+        type: string
+      artifacts:
+        type: array
+      incoherence:
+        type: object
+    routes:
+      - to: star_step
+
+  # ---------------------------------------------------------------------------
+  # Terminals
+  # ---------------------------------------------------------------------------
+  - name: done
+    type: terminate
+    status: success
+    input:
+      - star_step.output.ledger_path?
+      - star_step.output.plan_dir?
+      - star_step.output.reason?
+    reason: Star layered TDD run complete.
+    output_template:
+      status: complete
+      ledger: "{{ star_step.output.ledger_path }}"
+      plan: "{{ star_step.output.plan_dir }}"
+      reason: "{{ star_step.output.reason }}"
+
+  - name: stopped
+    type: terminate
+    status: success
+    reason: Human stopped the star layered TDD workflow.
+    output_template:
+      status: stopped
+      reason: Human stopped the star layered TDD workflow.
+
+  - name: cancelled
+    type: terminate
+    status: success
+    reason: Human cancelled the run at the objective gate.
+    output_template:
+      status: cancelled
+      reason: Human cancelled the run at the objective gate.
+
+  - name: failed
+    type: terminate
+    status: failed
+    input:
+      - star_step.output.reason?
+      - star_step.output.ledger_path?
+    reason: "Star router stopped: {{ star_step.output.reason }}"
+    output_template:
+      status: failed
+      reason: "{{ star_step.output.reason }}"
+      ledger: "{{ star_step.output.ledger_path }}"
