@@ -49,6 +49,24 @@ EFFORT = {"small": "high", "standard": "medium", "escalated": "high"}
 MAX_OBJECTIVE_ATTEMPTS = 5
 CAP_EXTENSION = 5
 GATE_ACTIONS_STOP = {"stop"}
+# Agents whose own approval gate runs next inside the spoke. A needs-human
+# outcome from them goes to that gate (the human answers there), not the hub.
+AGENT_GATES = {
+    "requirements_griller": "requirements_gate",
+    "requirements_reviser": "requirements_revision_gate",
+    "slice_selection_reviser": "slice_selection_revision_gate",
+    "slice_run_starter": "slice_requirements_gate",
+    "slice_requirements_reviser": "slice_requirements_revision_gate",
+    "slice_acceptance_planner": "slice_acceptance_design_gate",
+    "layer_mapper": "layer_map_gate",
+    "layer_map_reviser": "layer_map_revision_gate",
+    "layer_todo_generator": "layer_todo_gate",
+    "layer_todo_reviser": "layer_todo_revision_gate",
+    "cleanup_planner": "cleanup_plan_gate",
+    "cleanup_plan_reviser": "cleanup_plan_revision_gate",
+    "layer_reviewer": "layer_approval_gate",
+    "cleanup_reviewer": "cleanup_approval_gate",
+}
 GATE_ACTIONS_REDIRECT = {"redirect"}
 
 
@@ -360,7 +378,10 @@ class StarStep:
                 f("requirements.multiple_slices", bool(o("requirements_griller").get("multiple_slices")), "agent")
             if step in {"requirements_griller", "requirements_reviser"}:
                 if from_agent(step):
-                    return result
+                    if not (step == "requirements_griller" and result["outcome"] == "needs-human"
+                            and o(step).get("multiple_slices")):
+                        return result
+                    result.update(outcome="done", incoherence=None)
                 if step == "requirements_griller" and o(step).get("multiple_slices"):
                     result["decision"] = "multiple_slices"
                     f("requirements.decision", "multiple_slices", "agent")
@@ -846,10 +867,29 @@ class StarStep:
             if name in self.catalog and name != target and star_guard.legal(name, self.snap, self.catalog, self.environment):
                 label = f"Alternative: {name} — {shorten(str(alternative.get('reason', '')), 100)}"
                 choices[label] = {"action": "enter", "target": name, "brief": str(alternative.get("reason", ""))}
+        for label, choice in self.recovery_choices().items():
+            if not any(c.get("target") == choice.get("target") and c.get("action") == choice["action"] for c in choices.values()):
+                choices[label] = choice
         choices["Stop the run"] = {"action": "stop"}
         lines.append("Or write something else: free text goes back to the hub and counts as an escalation.")
         return self.ask_human({"kind": "proposal", "proposal": proposal, "text": "\n\n".join(lines),
                                "choices": choices, "allow_free_text": True})
+
+    def recovery_choices(self) -> dict[str, dict[str, Any]]:
+        """Always-available ways forward: the spoke's pending gate, a retry and the next canonical spoke."""
+        last = self.snap.get("last") or {}
+        origin, step = str(last.get("spoke") or ""), str(last.get("step") or "")
+        choices: dict[str, dict[str, Any]] = {}
+        gate = AGENT_GATES.get(step)
+        if gate and self.own_gate(step, "needs-human"):
+            choices[f"Review in the spoke gate: {gate}"] = {"action": "gate", "target": gate}
+        if origin in self.catalog:
+            if star_guard.legal(origin, self.snap, self.catalog, self.environment):
+                choices[f"Retry: {origin}"] = {"action": "enter", "target": origin, "brief": ""}
+            following = self.catalog.spokes[origin].get("default_next")
+            if following and star_guard.legal(following, self.snap, self.catalog, self.environment):
+                choices[f"Continue: {following}"] = {"action": "enter", "target": following, "brief": ""}
+        return choices
 
     def ask_human(self, pending: dict[str, Any]) -> dict[str, Any]:
         self.snap["pending"] = pending
@@ -891,6 +931,11 @@ class StarStep:
             self.snap["pending"] = None
             return self.escalate(pending.get("trigger", "no_rule"), pending.get("detail", ""), **(pending.get("extra") or {}))
         target = choice["target"]
+        if action == "gate":
+            self.snap["pending"] = None
+            self.snap["status"] = "running"
+            self.event("jump_confirmed", target=target, label=shorten(answer, 200), kind="spoke_gate")
+            return {"next": target, "spoke": self.last_spoke(), "reason": f"human:{target}"}
         veto = star_guard.check(target, self.snap, self.catalog, self.environment)
         if veto is not None:
             self.event("veto", proposer="human", target=target, **veto.as_dict())
@@ -911,6 +956,10 @@ class StarStep:
         self.event("spoke_returned", spoke=spoke, step=step, outcome=outcome, decision=decision,
                    reason=shorten(result["reason"], 400), artifacts=shorten(result["artifacts"]),
                    layer=self.facts.current_layer, brief_used=bool(entered.get("brief")))
+        gate = self.own_gate(step, outcome)
+        if gate:
+            self.event("needs_human_to_gate", spoke=spoke, step=step, gate=gate, reason=shorten(result["reason"], 400))
+            return {"next": gate, "spoke": spoke, "reason": f"needs-human:{step}->{gate}"}
         if decision in GATE_ACTIONS_STOP:
             self.event("run_stopped", status="stopped", by="human", at=step)
             return self.finish("stopped", "stopped", f"Human stopped the star run at {step}.")
@@ -931,6 +980,17 @@ class StarStep:
                 item["status"] = "resolved"
                 self.event("incoherence_resolved", id=item["id"], spoke=spoke)
         return self.route_after(spoke)
+
+    def own_gate(self, step: str, outcome: str) -> str:
+        """In-spoke approval gate that should receive a needs-human outcome from ``step``."""
+        if outcome != "needs-human" or step not in AGENT_GATES:
+            return ""
+        output = self.out(step)
+        if step == "requirements_griller" and output.get("multiple_slices"):
+            return ""
+        if step in {"cleanup_planner", "cleanup_plan_reviser"} and not output.get("ready_for_cleanup"):
+            return ""
+        return AGENT_GATES[step]
 
     # -- objective ------------------------------------------------------------
     def entry(self) -> dict[str, Any]:

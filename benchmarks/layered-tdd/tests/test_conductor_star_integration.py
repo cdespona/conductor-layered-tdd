@@ -125,8 +125,9 @@ assert cancel({"status": "pending"})["status"] == "cancelled"
 class StarFixture:
     """A fresh git repository with the canonical workflow tree copied in."""
 
-    def __init__(self, test, *, incoherence_first=False, unattended_confirm=False):
+    def __init__(self, test, *, incoherence_first=False, unattended_confirm=False, griller_needs_human=False):
         self.test = test
+        self.griller_needs_human = griller_needs_human
         self.incoherence_first = incoherence_first
         self.unattended_confirm = unattended_confirm
         self.steps = []
@@ -149,7 +150,9 @@ class StarFixture:
         if name == "requirements_griller":
             self.test.assertIn("Objective: Cancel a pending order", prompt)
             path = write(PLAN / "00-requirements.md", "# Cancel a pending order\n")
-            return contract(artifact_path=path, task_slug="smoke", multiple_slices=False,
+            outcome = "needs-human" if self.griller_needs_human else "done"
+            return contract(outcome=outcome, reason="The requirements artifact is ready for the human gate.",
+                            artifact_path=path, task_slug="smoke", multiple_slices=False,
                             blocker_count=0, summary="One slice")
         if name == "fast_triage":
             return contract(route="standard", reason="New behavior", allowed_paths=[], acceptance_criteria="")
@@ -294,6 +297,18 @@ class ConductorStarIntegration(unittest.TestCase):
             self.assertEqual(ledger.snapshot["status"], "done")
             self.assertEqual(ledger.snapshot["layers"]["closed"], ["L10"])
             self.assertFalse(Path(".github/plans/.star-pending/star-state.json").exists())
+
+    def test_needs_human_ready_for_the_spoke_gate_reaches_it_without_the_hub(self):
+        """L10 diagnostic regression: a griller answering needs-human must reach requirements_gate."""
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            fixture = StarFixture(self, griller_needs_human=True)
+            result = asyncio.run(fixture.run(fixture.setup()))
+            self.assertEqual(result["status"], "complete")
+            self.assertNotIn("hub", fixture.steps)
+            self.assertEqual(fixture.steps[1:4], ["requirements_griller", "requirements_gate", "fast_triage"])
+            ledger, events = ledger_events()
+            self.assertIn("needs_human_to_gate", events)
+            self.assertNotIn("escalation", events)
 
     def test_incoherence_escalates_to_hub_and_confirmed_backtrack_recovers(self):
         with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):

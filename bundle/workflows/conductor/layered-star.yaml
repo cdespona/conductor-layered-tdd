@@ -490,6 +490,20 @@ agents:
           - done
           - stopped
           - failed
+          - requirements_gate
+          - requirements_revision_gate
+          - slice_selection_revision_gate
+          - slice_requirements_gate
+          - slice_requirements_revision_gate
+          - slice_acceptance_design_gate
+          - layer_map_gate
+          - layer_map_revision_gate
+          - layer_todo_gate
+          - layer_todo_revision_gate
+          - cleanup_plan_gate
+          - cleanup_plan_revision_gate
+          - layer_approval_gate
+          - cleanup_approval_gate
     routes:
       - to: requirements_griller
         when: "{{ output.next == 'requirements_griller' }}"
@@ -551,6 +565,34 @@ agents:
         when: "{{ output.next == 'stopped' }}"
       - to: failed
         when: "{{ output.next == 'failed' }}"
+      - to: requirements_gate
+        when: "{{ output.next == 'requirements_gate' }}"
+      - to: requirements_revision_gate
+        when: "{{ output.next == 'requirements_revision_gate' }}"
+      - to: slice_selection_revision_gate
+        when: "{{ output.next == 'slice_selection_revision_gate' }}"
+      - to: slice_requirements_gate
+        when: "{{ output.next == 'slice_requirements_gate' }}"
+      - to: slice_requirements_revision_gate
+        when: "{{ output.next == 'slice_requirements_revision_gate' }}"
+      - to: slice_acceptance_design_gate
+        when: "{{ output.next == 'slice_acceptance_design_gate' }}"
+      - to: layer_map_gate
+        when: "{{ output.next == 'layer_map_gate' }}"
+      - to: layer_map_revision_gate
+        when: "{{ output.next == 'layer_map_revision_gate' }}"
+      - to: layer_todo_gate
+        when: "{{ output.next == 'layer_todo_gate' }}"
+      - to: layer_todo_revision_gate
+        when: "{{ output.next == 'layer_todo_revision_gate' }}"
+      - to: cleanup_plan_gate
+        when: "{{ output.next == 'cleanup_plan_gate' }}"
+      - to: cleanup_plan_revision_gate
+        when: "{{ output.next == 'cleanup_plan_revision_gate' }}"
+      - to: layer_approval_gate
+        when: "{{ output.next == 'layer_approval_gate' }}"
+      - to: cleanup_approval_gate
+        when: "{{ output.next == 'cleanup_approval_gate' }}"
       - to: failed
 
   - name: hub

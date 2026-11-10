@@ -349,6 +349,45 @@ class StarStepTests(unittest.TestCase):
         self.assertEqual(result["next"], "hub")
         self.assertEqual(result["hub_input"]["escalation"]["human_text"], "the 409 test wins")
 
+    def requirements_snapshot(self):
+        snap = star_ledger.empty_snapshot()
+        snap["facts"]["objective"] = fact("Cancel orders", "requirements")
+        snap["objective"] = "Cancel orders"
+        snap["cursor"] = {"spoke": "requirements", "phase": 1, "sub": 0, "layer": None}
+        return snap
+
+    def test_needs_human_from_agent_with_own_gate_goes_to_that_gate_not_the_hub(self):
+        griller = {"artifact_path": "", "task_slug": "s", "multiple_slices": False, "blocker_count": 1,
+                   "summary": "", "outcome": "needs-human", "reason": "ready for the human gate"}
+        step = self.make(self.requirements_snapshot(), ["star_step", "requirements_griller"],
+                         {"requirements_griller": griller})
+        result = step.dispatch()
+        self.assertEqual(result["next"], "requirements_gate")
+        self.assertEqual(step.snap["escalations"]["used"], 0)
+        self.assertIn("needs_human_to_gate", [e["type"] for e in step.ledger.events])
+
+    def test_needs_human_without_own_gate_still_escalates(self):
+        snap = self.layer_snapshot()
+        snap["facts"]["L[L10].snapshot_tree"] = fact("abc", "implement", "L10")
+        step = self.make(snap, ["implementor"], {"implementor": {
+            "outcome": "needs-human", "reason": "new behavior", "checkpoint_required": True}})
+        self.assertEqual(step.dispatch()["next"], "hub")
+
+    def test_ask_human_offers_the_pending_spoke_gate_and_retry(self):
+        griller = {"multiple_slices": False, "outcome": "blocked", "reason": "r"}
+        step = self.make(self.requirements_snapshot(), ["hub"], {
+            "requirements_griller": griller,
+            "hub": {"next": "ask_human", "reason": "unclear", "brief": "", "confidence": "high", "alternatives": []}})
+        step.snap["last"] = {"spoke": "requirements", "step": "requirements_griller", "outcome": "blocked"}
+        result = step.dispatch()
+        choices = result["confirm_questions"][0]["choices"]
+        self.assertIn("Review in the spoke gate: requirements_gate", choices)
+        self.assertIn("Retry: requirements", choices)
+        self.assertGreater(len(choices), 1)
+        step.outputs["confirm_gate"] = {"answers": {"decision": "Review in the spoke gate: requirements_gate"}}
+        step.history = ["confirm_gate"]
+        self.assertEqual(step.dispatch()["next"], "requirements_gate")
+
     def test_objective_gate_loops_on_empty_answer(self):
         with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
             step = star_step.StarStep({"history": ["graphify_update_gate"], "inputs": {"request": ""}, "outputs": {}},
