@@ -43,11 +43,15 @@ def boundary_paths(todo: Path) -> tuple[list[str], list[str]]:
     match = re.search(r"(?ms)^## Implementation Boundary\s*\n(?P<body>.*?)(?=^##\s|\Z)", content)
     if not match:
         return [], []
-    rows = [
-        [cell.strip() for cell in line.strip().strip("|").split("|")]
-        for line in match.group("body").splitlines()
-        if line.lstrip().startswith("|")
-    ]
+    # Only the first contiguous table declares the permission columns; later
+    # tables in the section (for example downstream obligations) are prose.
+    table: list[str] = []
+    for line in match.group("body").splitlines():
+        if line.lstrip().startswith("|"):
+            table.append(line)
+        elif table:
+            break
+    rows = [[cell.strip() for cell in line.strip().strip("|").split("|")] for line in table]
     if len(rows) < 2:
         return [], []
 

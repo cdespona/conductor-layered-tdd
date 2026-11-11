@@ -43,6 +43,21 @@ cleanup_check = load_module("check_cleanup_result", SCRIPTS / "check-cleanup-res
 test_author_recorder = load_module("record_test_author", SCRIPTS / "record-test-author.py")
 
 
+TWO_TABLE_BOUNDARY = """## Implementation Boundary
+
+| Allowed production paths | Forbidden areas | Read-only test paths | Top-level behavior limits |
+| --- | --- | --- | --- |
+| `internal/orders/order.go` | `internal/legacy/**`; `internal/orders/service.go` | `internal/orders/order_test.go` | Implement `func (o Order) Cancel() (updated Order, changed bool, err error)` only. |
+
+| Layer | Exact obligation |
+| --- | --- |
+| `L20-service` | Add `func (s *Service) Cancel(ctx context.Context, id string) (Order, error)`. |
+| `L30-http` | Expose `POST /orders/{id}/cancel`. |
+
+## Task Board
+"""
+
+
 @contextmanager
 def working_directory(path: Path):
     previous = Path.cwd()
@@ -275,6 +290,18 @@ class LayerDiffTests(unittest.TestCase):
             [".github/plans/slice/L10.todo.md"],
         )
 
+    def test_runtime_boundary_ignores_later_tables_in_the_section(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            todo = Path(directory) / "L10.todo.md"
+            todo.write_text(TWO_TABLE_BOUNDARY, encoding="utf-8")
+            allowed, forbidden = layer_diff.boundary_paths(todo)
+
+        self.assertEqual(allowed, ["internal/orders/order.go"])
+        self.assertEqual(
+            forbidden,
+            ["internal/legacy/**", "internal/orders/order_test.go", "internal/orders/service.go"],
+        )
+
     def test_multi_column_runtime_boundary_keeps_forbidden_paths_forbidden(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             todo = Path(directory) / "L10.todo.md"
@@ -473,6 +500,15 @@ Given a pending order, when it is cancelled, then its state is cancelled.
         )
         self.assertEqual(result["forbidden_paths"], ["Makefile", "internal/legacy"])
         self.assertEqual(result["read_only_paths"], ["internal/orders/service_test.go"])
+
+    def test_strict_permissions_read_only_the_first_boundary_table(self) -> None:
+        allowed, forbidden, read_only = layer_context.boundary_paths(
+            TWO_TABLE_BOUNDARY, strict_permissions=True
+        )
+
+        self.assertEqual(allowed, ["internal/orders/order.go"])
+        self.assertEqual(forbidden, ["internal/legacy/**", "internal/orders/service.go"])
+        self.assertEqual(read_only, ["internal/orders/order_test.go"])
 
     def test_generated_todo_permissions_reject_mapper_style_prose(self) -> None:
         content = """## Implementation Boundary
@@ -890,6 +926,24 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("to: requirements_griller", change_check)
         self.assertIn("output.changed_files | length == 0", change_check)
         self.assertIn("--allowed-paths-json", change_check)
+
+    def test_failed_layer_context_never_reaches_an_agent(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        for context, success in (
+            ("test_author_context", "test_author_snapshot"),
+            ("implementation_context", "acceptance_guard_layer_snapshot"),
+        ):
+            block = workflow.split(f"  - name: {context}\n", 1)[1].split("\n  - name:", 1)[0]
+            routes = block.split("    routes:\n", 1)[1]
+            self.assertIn(
+                f"      - to: {success}\n        when: \"{{{{ output.exit_code == 0 }}}}\"\n"
+                "      - to: layer_context_failure_gate",
+                routes,
+            )
+        gate = workflow.split("  - name: layer_context_failure_gate\n", 1)[1].split("\n  - name:", 1)[0]
+        self.assertIn("route: layer_todo_reviser", gate)
+        reviser = workflow.split("  - name: layer_todo_reviser\n", 1)[1].split("\n  - name:", 1)[0]
+        self.assertIn("layer_context_failure_gate.output?", reviser)
 
     def test_execution_model_follows_approved_layer_size(self) -> None:
         try:
