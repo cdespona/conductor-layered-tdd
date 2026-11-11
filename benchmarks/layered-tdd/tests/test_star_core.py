@@ -373,6 +373,31 @@ class StarStepTests(unittest.TestCase):
             "outcome": "needs-human", "reason": "new behavior", "checkpoint_required": True}})
         self.assertEqual(step.dispatch()["next"], "hub")
 
+    def final_snapshot(self):
+        snap = snapshot(acceptance__approved=(True, "acceptance-build"), acceptance__state_path=("s.json", "acceptance-build"))
+        snap["layers"]["closed"] = ["L10"]
+        snap["cursor"] = {"spoke": "final", "phase": CATALOG.position("final")[0],
+                          "sub": CATALOG.position("final")[1], "layer": None}
+        snap["entered"] = {"spoke": "final", "brief": ""}
+        return snap
+
+    def final_step(self, outcome, green=True):
+        return self.make(self.final_snapshot(), ["star_step", "slice_acceptance_final", "final_reviewer"], {
+            "slice_acceptance_final": {"proceed": green, "summary": "green" if green else "red"},
+            "final_reviewer": {"outcome": outcome, "reason": "a human must decide on memory",
+                               "ready_to_finish": False, "memory_candidates": ["m"], "artifacts": []}})
+
+    def test_final_review_needing_the_memory_decision_goes_to_the_memory_gate(self):
+        step = self.final_step("needs-human")
+        self.assertEqual(step.dispatch()["next"], "memory_gate")
+        self.assertEqual(step.snap["escalations"]["used"], 0)
+        self.assertTrue(step.facts.get("final.reviewed"))
+
+    def test_blocked_final_review_still_escalates(self):
+        step = self.final_step("blocked")
+        self.assertEqual(step.dispatch()["next"], "hub")
+        self.assertIsNone(step.facts.get("final.reviewed"))
+
     def test_ask_human_offers_the_pending_spoke_gate_and_retry(self):
         griller = {"multiple_slices": False, "outcome": "blocked", "reason": "r"}
         step = self.make(self.requirements_snapshot(), ["hub"], {

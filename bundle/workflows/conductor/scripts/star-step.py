@@ -651,9 +651,15 @@ class StarStep:
                 f("final.acceptance_green", False)
                 result.update(outcome="blocked", reason=str(o(step).get("summary", "final slice acceptance failed")))
                 return result
-            f("final.acceptance_green", bool(o("slice_acceptance_final").get("proceed")))
+            green = bool(o("slice_acceptance_final").get("proceed"))
+            f("final.acceptance_green", green)
             if from_agent("final_reviewer"):
-                return result
+                # The memory gate is the final review's human decision: it shows
+                # the risks and candidates and offers capture, skip, revise or
+                # redirect. Sending needs-human to the hub would only loop.
+                if not (green and result["outcome"] == "needs-human"):
+                    return result
+                result.update(outcome="done", incoherence={})
             f("final.reviewed", True, "agent")
             return result
 
