@@ -148,7 +148,8 @@ class StarFixture:
         name = agent.name
         self.steps.append(name)
         if name == "requirements_griller":
-            self.test.assertIn("Objective: Cancel a pending order", prompt)
+            self.test.assertIn("```text\nCancel a pending order\n```", prompt)
+            self.test.assertNotIn("## Star return\nRequest:", prompt)
             path = write(PLAN / "00-requirements.md", "# Cancel a pending order\n")
             outcome = "needs-human" if self.griller_needs_human else "done"
             return contract(outcome=outcome, reason="The requirements artifact is ready for the human gate.",
@@ -185,7 +186,7 @@ class StarFixture:
             return contract(artifact_path=str(TODO), selected_layer="L10", test_ownership="human-written",
                             red_gate_state="blocked", ready_for_implementation=False, summary="Layer test ready")
         if name == "layer_todo_reviser":
-            self.test.assertIn("Brief from the hub", prompt)
+            self.test.assertIn("Hub brief (priority):", prompt)
             self.test.assertIn("second cancellation returns 409", prompt)
             return contract(artifact_path=str(TODO), selected_layer="L10", test_ownership="human-written",
                             red_gate_state="blocked", ready_for_implementation=False, summary="Contract aligned with 409")

@@ -31,7 +31,6 @@ workflow:
     - "If the Copilot CLI caveman skill is available, use caveman for planning notes, checkpoints, summaries, and human gate text. Keep artifact schemas, commands, paths, errors, and verification results exact and readable."
     - "For standard slices, the human-approved 02-slice-acceptance.json is the outer behavior contract. Its scenario and protected_files (tests, DSL, drivers, fixtures, approved persistence representations) remain read-only during layers. Report an incoherence instead of changing them. Layer regression excludes only the named pending outer AT; every other failure remains blocking and final slice acceptance must be green."
     - "When graphify-out/graph.json exists, use Graphify only for bounded repository-navigation questions before opening returned source locations. Do not rebuild or update the graph from an agent prompt."
-    - "Never edit `.github/plans/*/star-state.json`; only the star_step guard writes it."
   limits:
     max_iterations: 500
     # The star benchmark runs each case with budget_mode: enforce.

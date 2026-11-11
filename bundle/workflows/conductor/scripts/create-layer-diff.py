@@ -175,7 +175,12 @@ def create(
     after = current_tree()
     names = git(["diff", "--name-only", "--find-renames", snapshot, after])
     changed = [line for line in names.splitlines() if line]
-    patch = git(["diff", "--binary", "--find-renames", snapshot, after], binary=True)
+    # The star guard's own ledger writes are workflow state, not layer work:
+    # keep them out of the changed files and the reviewer patch entirely.
+    guard_ledgers = guard_written_ledgers(changed, repository_root, ledger_sha)
+    changed = [path for path in changed if path not in guard_ledgers]
+    excludes = [f":(top,exclude){path}" for path in guard_ledgers]
+    patch = git(["diff", "--binary", "--find-renames", snapshot, after, *(["--", ":/", *excludes] if excludes else [])], binary=True)
     descriptor, patch_name = tempfile.mkstemp(prefix="conductor-layer-diff-", suffix=".patch")
     with os.fdopen(descriptor, "wb") as handle:
         handle.write(patch)
@@ -214,7 +219,7 @@ def create(
             "boundary_violations": sorted(set(violations)),
         })
     else:
-        exempt = ([todo_path] if todo_path else []) + guard_written_ledgers(changed, repository_root, ledger_sha)
+        exempt = [todo_path] if todo_path else []
         result.update(classify(changed, allowed, forbidden, exempt))
         protected = [
             path for path in changed
