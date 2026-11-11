@@ -99,6 +99,21 @@ def markdown_rows(body: str) -> list[list[str]]:
     ]
 
 
+def first_table_rows(body: str) -> list[list[str]]:
+    """Rows of the first contiguous Markdown table in a section body.
+
+    A boundary section may carry further tables (for example downstream
+    obligations); only the first one declares the permission columns.
+    """
+    lines: list[str] = []
+    for line in body.splitlines():
+        if line.lstrip().startswith("|"):
+            lines.append(line)
+        elif lines:
+            break
+    return markdown_rows("\n".join(lines))
+
+
 def clean_paths(values: list[str]) -> list[str]:
     paths = []
     for value in values:
@@ -164,7 +179,7 @@ def boundary_paths(
         )
     if not match:
         return [], [], []
-    rows = markdown_rows(match.group("body"))
+    rows = first_table_rows(match.group("body"))
     if len(rows) < 2:
         return [], [], []
     headers = [cell.lower() for cell in rows[0]]

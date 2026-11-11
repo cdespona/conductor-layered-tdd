@@ -16,6 +16,7 @@ Available feedback (blank entries did not occur on the active route):
 - test-author checkpoint: {% if agent_test_checkpoint_gate is defined and agent_test_checkpoint_gate.output is defined and agent_test_checkpoint_gate.output.additional_input is defined %}{{ agent_test_checkpoint_gate.output.additional_input.feedback | default("") }}{% endif %}
 - implementation checkpoint: {% if checkpoint_gate is defined and checkpoint_gate.output is defined and checkpoint_gate.output.additional_input is defined %}{{ checkpoint_gate.output.additional_input.feedback | default("") }}{% endif %}
 - deterministic test-author preparation: {% if test_author_preparation_gate is defined and test_author_preparation_gate.output is defined and test_author_preparation_gate.output.additional_input is defined %}{{ test_author_preparation_gate.output.additional_input.feedback | default("") }}{% endif %}
+- deterministic layer context: {% if layer_context_failure_gate is defined and layer_context_failure_gate.output is defined and layer_context_failure_gate.output.additional_input is defined %}{{ layer_context_failure_gate.output.additional_input.feedback | default("") }}{% endif %}
 - deterministic test-author result check: {% if test_author_result_gate is defined and test_author_result_gate.output is defined and test_author_result_gate.output.additional_input is defined %}{{ test_author_result_gate.output.additional_input.feedback | default("") }}{% endif %}
 
 Persist the immediately preceding Conductor gate decision and any non-empty gate

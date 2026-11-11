@@ -1688,6 +1688,7 @@ agents:
       - checkpoint_gate.output?
       - test_author_preparation_gate.output?
       - test_author_result_gate.output?
+      - layer_context_failure_gate.output?
     prompt: !file prompts/layer-todo-reviser.md
     output:
       artifact_path:
@@ -1814,6 +1815,8 @@ agents:
       - "{{ workflow.input.request }}"
     routes:
       - to: test_author_snapshot
+        when: "{{ output.exit_code == 0 }}"
+      - to: layer_context_failure_gate
 
   - name: test_author_preparation_gate
     type: human_gate
@@ -2088,6 +2091,29 @@ agents:
       - "{{ workflow.input.request }}"
     routes:
       - to: acceptance_guard_layer_snapshot
+        when: "{{ output.exit_code == 0 }}"
+      - to: layer_context_failure_gate
+
+  - name: layer_context_failure_gate
+    type: human_gate
+    prompt: |
+      The deterministic layer context could not be built from the active layer
+      todo, so no agent runs on a partial handoff. Revise the todo so its
+      boundary section starts with one machine-readable permission table.
+
+      Active layer todo: `{{ layer_todo_generator.output.artifact_path }}`
+      Error: {% if implementation_context is defined and implementation_context.output is defined and implementation_context.output.exit_code != 0 %}{{ implementation_context.output.stderr }}{% elif test_author_context is defined and test_author_context.output is defined %}{{ test_author_context.output.stderr }}{% endif %}
+    options:
+      - label: Revise the current layer todo.
+        value: revise_layer_todo
+        prompt_for: feedback
+        route: layer_todo_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: layer_selection_gate
+      - label: Stop this slice.
+        value: stop
+        route: stopped
 
   - name: implementor
     description: Implement only inside the approved layer boundary.
