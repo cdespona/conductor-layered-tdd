@@ -272,6 +272,17 @@ class SliceAcceptanceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             acceptance.paths(["escape/test.py"])
 
+    def test_forbidden_files_may_name_instruction_and_workflow_files(self):
+        self.plan["forbidden_files"] += ["AGENTS.md", "workflows/conductor/layered-tdd.yaml",
+                                         ".github/copilot-instructions.md"]
+        self.write_plan()
+        self.assertTrue(self.prepare()["proceed"])
+        for key in ("allowed_files", "protected_files"):
+            plan = dict(self.plan, **{key: self.plan[key] + ["AGENTS.md"]})
+            self.plan_path.write_text(json.dumps(plan))
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "invalid acceptance file scope: AGENTS.md"):
+                acceptance.read_plan(self.plan_path)
+
     def test_symlink_created_during_support_does_not_expand_scope(self):
         self.prepare()
         self.build()
@@ -286,6 +297,14 @@ class SliceAcceptanceRoutingTests(unittest.TestCase):
     def blocks():
         content = WORKFLOW.read_text()
         return {part.splitlines()[0]: part for part in content.split("  - name: ")[1:]}
+
+    def test_planner_revision_sees_the_failure_that_blocked_acceptance(self):
+        planner = self.blocks()["slice_acceptance_planner"]
+        prompt = (WORKFLOW.parent / "prompts" / "slice-acceptance-planner.md").read_text()
+        for step in ("slice_acceptance_prepare", "slice_acceptance_verify", "slice_acceptance_approve", "slice_acceptance_final"):
+            self.assertIn(f"- {step}.output?", planner)
+            self.assertIn(step, prompt.split("Latest acceptance failure")[0].rsplit("{% endfor %}", 1)[-1])
+        self.assertIn("Latest acceptance failure: {{ step.output.summary }}", prompt)
 
     def test_all_standard_requirement_approvals_prepare_acceptance_first(self):
         blocks = self.blocks()

@@ -8,6 +8,9 @@ Selected slice requirements: `{{ slice_run_starter.output.artifact_path }}`
 Human decision: {{ gate.output.selected | default('') }}
 Feedback: {{ gate.output.additional_input.feedback | default('') if gate.output.additional_input is defined else '' }}
 {% endfor %}
+{% for step in [slice_acceptance_prepare, slice_acceptance_verify, slice_acceptance_approve, slice_acceptance_final] if step is defined and step.output is defined and step.output.proceed is defined and not step.output.proceed %}
+Latest acceptance failure: {{ step.output.summary }}
+{% endfor %}
 
 Original full-suite command: `{{ workflow.input.test_command }}`
 
