@@ -11,3 +11,4 @@ vet:
 
 validate:
 	conductor validate bundle/workflows/conductor/layered-tdd.yaml
+	conductor validate bundle/workflows/conductor/layered-star.yaml

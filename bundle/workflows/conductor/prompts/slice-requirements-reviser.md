@@ -30,3 +30,11 @@ Return structured output:
 - `artifact_path`: exactly `{{ slice_run_starter.output.artifact_path }}`
 - `blocker_count`: unresolved blocker count after revision
 - `summary`: short summary of reconciled feedback and remaining decisions
+
+{% for star in [star_step] if star is defined and star.output is defined %}
+## Star return
+{% if star.output.brief %}Hub brief (priority): {{ star.output.brief }}
+{% endif %}Also return `outcome`, `reason`, `artifacts` (paths changed) and `incoherence`.
+`outcome`: `done` (result produced) | `blocked` (cannot produce it) | `needs-human` (a decision only a human can take) | `incoherence` (an approved contract contradicts the work; set `incoherence` to {claim, source, conflicts_with}, else `{}`).
+An artifact awaiting your own approval gate is `done`.
+{% endfor %}

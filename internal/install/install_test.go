@@ -199,3 +199,48 @@ func assertContains(t *testing.T, path, marker string) {
 		t.Fatalf("%q does not contain %q", path, marker)
 	}
 }
+
+func TestInstallAndSyncCarryBothWorkflows(t *testing.T) {
+	for _, provider := range []Provider{ProviderCopilot, ProviderClaude} {
+		target := t.TempDir()
+		if _, err := Run(Options{Target: target, Provider: provider}); err != nil {
+			t.Fatalf("%s install: %v", provider, err)
+		}
+		star := filepath.Join(target, "workflows", "conductor", "layered-star.yaml")
+		assertContains(t, star, "name: star_step")
+		assertContains(t, filepath.Join(target, "workflows", "conductor", "star", "canonical-table.json"), `"rules"`)
+		assertContains(t, filepath.Join(target, "workflows", "conductor", "scripts", "star-step.py"), "def main()")
+		assertContains(t, manifestPath(target), "workflows/conductor/layered-star.yaml")
+		assertContains(t, manifestPath(target), "workflows/conductor/layered-tdd.yaml")
+		if provider == ProviderClaude {
+			assertContains(t, star, "name: claude-agent-sdk")
+			assertContains(t, star, "model: claude-haiku-5-5")
+			data, err := os.ReadFile(star)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "reasoning:") || strings.Contains(string(data), "gpt-6") {
+				t.Fatal("Claude variant of layered-star.yaml must drop reasoning blocks and Copilot models")
+			}
+		}
+		result, err := Run(Options{Target: target, Mode: ModeSync})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Updated) != 0 || len(result.Preserved) != 0 {
+			t.Fatalf("%s sync changed a clean install: %+v", provider, result)
+		}
+	}
+}
+
+func TestBundledFilesSkipPythonCaches(t *testing.T) {
+	files, err := bundledFiles(false, ProviderCopilot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if strings.Contains(file.Target, "__pycache__") || strings.HasSuffix(file.Target, ".pyc") {
+			t.Fatalf("bundled Python cache: %s", file.Target)
+		}
+	}
+}

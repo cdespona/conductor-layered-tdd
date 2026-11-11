@@ -35,3 +35,11 @@ Read the active `02-slice-acceptance.json`. Account explicitly for support and
 approved persistence/model decisions already implemented before layers; assign
 only remaining internal work. Keep its protected files outside writable layer
 boundaries. Corrections require human acceptance reapproval.
+
+{% for star in [star_step] if star is defined and star.output is defined %}
+## Star return
+{% if star.output.brief %}Hub brief (priority): {{ star.output.brief }}
+{% endif %}Also return `outcome`, `reason`, `artifacts` (paths changed) and `incoherence`.
+`outcome`: `done` (result produced) | `blocked` (cannot produce it) | `needs-human` (a decision only a human can take) | `incoherence` (an approved contract contradicts the work; set `incoherence` to {claim, source, conflicts_with}, else `{}`).
+An artifact awaiting your own approval gate is `done`.
+{% endfor %}

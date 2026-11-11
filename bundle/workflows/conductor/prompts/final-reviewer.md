@@ -70,3 +70,10 @@ Acceptance evidence:
   approved acceptance plan unchanged.
 
 {{ slice_acceptance_final.output }}
+
+{% for star in [star_step] if star is defined and star.output is defined %}
+## Star return
+{% if star.output.brief %}Hub brief (priority): {{ star.output.brief }}
+{% endif %}Also return `outcome`, `reason`, `artifacts` (paths changed) and `incoherence`.
+`outcome`: `done` (result produced) | `blocked` (cannot produce it) | `needs-human` (a decision only a human can take) | `incoherence` (an approved contract contradicts the work; set `incoherence` to {claim, source, conflicts_with}, else `{}`).
+{% endfor %}

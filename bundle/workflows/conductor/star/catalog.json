@@ -1,0 +1,194 @@
+{
+  "description": "Spoke catalog of layered-star.yaml. Each spoke is a decision unit of ltdd: its agent or human decision with its deterministic scripts and its approval gate. 'steps' must match the workflow step names; 'requires' is the precondition the guard checks before entry.",
+  "phases": ["preflight", "requirements", "triage", "fast", "slice-acceptance", "layer-map", "layer", "final", "memory"],
+  "spokes": {
+    "requirements": {
+      "phase": "requirements",
+      "sub": 0,
+      "entry": "requirements_griller",
+      "reopen_entry": "requirements_reviser",
+      "default_next": "triage",
+      "steps": ["requirements_griller", "requirements_gate", "requirements_reviser", "requirements_revision_gate"],
+      "preconditions": "An objective exists.",
+      "requires": {"exists": "objective"}
+    },
+    "triage": {
+      "phase": "triage",
+      "sub": 0,
+      "entry": "fast_triage",
+      "default_next": "acceptance-design",
+      "steps": ["fast_triage"],
+      "preconditions": "Requirements approved or split into slices.",
+      "requires": {"in": ["requirements.decision", ["approve", "multiple_slices"]]}
+    },
+    "fast-change": {
+      "phase": "fast",
+      "sub": 0,
+      "code": true,
+      "entry": "fast_snapshot",
+      "default_next": null,
+      "steps": ["fast_snapshot", "fast_implementor", "fast_change_check", "fast_verification_tests", "fast_verification_lint", "fast_verification_security", "fast_approval_gate"],
+      "preconditions": "Triage returned fast with 1-3 exact allowed paths (deterministic exemption).",
+      "requires": {"eq": ["triage.fast_bounded", true]}
+    },
+    "slice-selection": {
+      "phase": "slice-acceptance",
+      "sub": 0,
+      "entry": "slice_selection_gate",
+      "default_next": "acceptance-design",
+      "steps": ["slice_selection_gate", "slice_selection_reviser", "slice_selection_revision_gate", "slice_run_starter", "slice_requirements_gate", "slice_requirements_reviser", "slice_requirements_revision_gate"],
+      "preconditions": "Requirements found multiple slices.",
+      "requires": {"eq": ["requirements.multiple_slices", true]}
+    },
+    "acceptance-design": {
+      "phase": "slice-acceptance",
+      "sub": 1,
+      "entry": "slice_acceptance_planner",
+      "default_next": "acceptance-build",
+      "steps": ["slice_acceptance_planner", "slice_acceptance_design_gate"],
+      "preconditions": "One slice has approved requirements.",
+      "requires": {"any": [{"eq": ["requirements.decision", "approve"]}, {"eq": ["slice.decision", "approve"]}]}
+    },
+    "acceptance-build": {
+      "phase": "slice-acceptance",
+      "sub": 2,
+      "entry": "slice_acceptance_prepare",
+      "default_next": "layer-map",
+      "steps": ["slice_acceptance_prepare", "slice_acceptance_builder", "slice_acceptance_verify", "slice_acceptance_validation_gate", "slice_acceptance_approve"],
+      "preconditions": "Acceptance design approved by a human.",
+      "requires": {"eq": ["acceptance.design_decision", "approve"]}
+    },
+    "layer-map": {
+      "phase": "layer-map",
+      "sub": 0,
+      "entry": "layer_mapper",
+      "reopen_entry": "layer_map_reviser",
+      "default_next": "layer-select",
+      "steps": ["layer_mapper", "layer_map_gate", "layer_map_reviser", "layer_map_revision_gate"],
+      "preconditions": "Slice acceptance validated and approved.",
+      "requires": {"eq": ["acceptance.approved", true]}
+    },
+    "layer-select": {
+      "phase": "layer",
+      "sub": 0,
+      "entry": "layer_selection_gate",
+      "default_next": "layer-todo",
+      "steps": ["layer_selection_gate", "layer_selection_recorder", "selected_layer_router"],
+      "preconditions": "Layer map approved.",
+      "requires": {"eq": ["layer_map.decision", "approve"]}
+    },
+    "layer-todo": {
+      "phase": "layer",
+      "sub": 1,
+      "entry": "selected_layer_context",
+      "reopen_entry": "layer_todo_reviser",
+      "default_next": "test-author",
+      "steps": ["selected_layer_context", "layer_todo_generator", "layer_todo_gate", "layer_todo_reviser", "layer_todo_revision_gate", "layer_context_failure_gate"],
+      "preconditions": "A behavior or infrastructure layer is selected.",
+      "requires": {"in": ["layer.work_kind", ["behavior", "infrastructure"]]}
+    },
+    "test-author": {
+      "phase": "layer",
+      "sub": 2,
+      "tests_only": true,
+      "entry": "test_author_preparer",
+      "default_next": "red-gate",
+      "steps": ["test_author_preparer", "test_author_context", "test_author_snapshot", "agent_test_author", "test_author_completion_recorder"],
+      "preconditions": "Layer todo approved with agent-authored top-level test.",
+      "requires": {"eq": ["layer.todo_decision", "author_agent_test"]}
+    },
+    "red-gate": {
+      "phase": "layer",
+      "sub": 3,
+      "entry": "red_suite_verifier",
+      "default_next": "implement",
+      "steps": ["red_suite_verifier", "red_suite_evidence_recorder", "red_suite_evidence_gate", "red_gate_decision_recorder"],
+      "preconditions": "Layer todo approved and the top-level test exists (human-written or authored).",
+      "requires": {"any": [{"eq": ["layer.todo_decision", "verify_existing_test"]}, {"eq": ["layer.test_author_passed", true]}]}
+    },
+    "implement": {
+      "phase": "layer",
+      "sub": 4,
+      "code": true,
+      "entry": "implementation_context",
+      "default_next": "verify",
+      "steps": ["implementation_context", "layer_snapshot", "implementor"],
+      "preconditions": "Allowed red gate for the current layer, or an approved infrastructure layer (I1); unchanged acceptance contract (I2).",
+      "requires": {"all": [{"exists": "layer.todo_path"}, {"in": ["layer.work_kind", ["behavior", "infrastructure"]]}]}
+    },
+    "verify": {
+      "phase": "layer",
+      "sub": 5,
+      "entry": "verification_tests",
+      "default_next": "layer-review",
+      "steps": ["verification_tests", "verification_lint", "verification_security", "layer_diff"],
+      "preconditions": "The implementor ran for the current layer.",
+      "requires": {"all": [{"exists": "layer.snapshot_tree"}, {"in": ["layer.work_kind", ["behavior", "infrastructure"]]}]}
+    },
+    "layer-review": {
+      "phase": "layer",
+      "sub": 6,
+      "entry": "layer_reviewer",
+      "default_next": "layer-select",
+      "steps": ["layer_reviewer", "layer_approval_gate"],
+      "preconditions": "Green verification on the current tree (I6); unchanged acceptance contract (I2).",
+      "requires": {"all": [{"exists": "layer.verify_tree"}, {"in": ["layer.work_kind", ["behavior", "infrastructure"]]}]}
+    },
+    "cleanup-plan": {
+      "phase": "layer",
+      "sub": 1,
+      "entry": "cleanup_plan_context",
+      "reopen_entry": "cleanup_plan_reviser",
+      "default_next": "cleanup-implement",
+      "steps": ["cleanup_plan_context", "cleanup_planner", "cleanup_plan_gate", "cleanup_plan_reviser", "cleanup_plan_revision_gate", "cleanup_plan_validator", "cleanup_baseline_tests", "cleanup_baseline_lint", "cleanup_baseline_security"],
+      "preconditions": "A cleanup layer is selected.",
+      "requires": {"eq": ["layer.work_kind", "cleanup"]}
+    },
+    "cleanup-implement": {
+      "phase": "layer",
+      "sub": 4,
+      "code": true,
+      "entry": "cleanup_implementation_context",
+      "default_next": "cleanup-verify",
+      "steps": ["cleanup_implementation_context", "cleanup_layer_snapshot", "cleanup_implementor"],
+      "preconditions": "Human-approved cleanup layer with green baseline (I1 exemption); unchanged acceptance contract (I2).",
+      "requires": {"eq": ["layer.work_kind", "cleanup"]}
+    },
+    "cleanup-verify": {
+      "phase": "layer",
+      "sub": 5,
+      "entry": "cleanup_verification_tests",
+      "default_next": "cleanup-review",
+      "steps": ["cleanup_verification_tests", "cleanup_verification_lint", "cleanup_verification_security", "cleanup_result_check", "cleanup_layer_diff"],
+      "preconditions": "The cleanup implementor ran for the current layer.",
+      "requires": {"all": [{"exists": "layer.snapshot_tree"}, {"eq": ["layer.work_kind", "cleanup"]}]}
+    },
+    "cleanup-review": {
+      "phase": "layer",
+      "sub": 6,
+      "entry": "cleanup_reviewer",
+      "default_next": "layer-select",
+      "steps": ["cleanup_reviewer", "cleanup_approval_gate"],
+      "preconditions": "Green cleanup verification on the current tree (I6); unchanged acceptance contract (I2).",
+      "requires": {"all": [{"exists": "layer.verify_tree"}, {"eq": ["layer.work_kind", "cleanup"]}]}
+    },
+    "final": {
+      "phase": "final",
+      "sub": 0,
+      "entry": "slice_acceptance_final",
+      "default_next": "memory",
+      "steps": ["slice_acceptance_final", "final_reviewer"],
+      "preconditions": "Every selected layer closed and no open incoherence (I7).",
+      "requires": {"eq": ["acceptance.approved", true]}
+    },
+    "memory": {
+      "phase": "memory",
+      "sub": 0,
+      "entry": "memory_gate",
+      "default_next": null,
+      "steps": ["memory_gate", "memory_capturer"],
+      "preconditions": "Final review done; capture only after human approval at the memory gate (I8).",
+      "requires": {"eq": ["final.reviewed", true]}
+    }
+  }
+}

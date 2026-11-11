@@ -80,3 +80,12 @@ Return structured output:
 - `multiple_slices`: true only when `slice-selection.md` was produced
 - `blocker_count`: unresolved blocker count
 - `summary`: short summary for the human gate
+
+{% for star in [star_step] if star is defined and star.output is defined %}
+## Star return
+{% if not workflow.input.request %}Request: {{ star.output.objective }}
+{% endif %}{% if star.output.brief %}Hub brief (priority): {{ star.output.brief }}
+{% endif %}Also return `outcome`, `reason`, `artifacts` (paths changed) and `incoherence`.
+`outcome`: `done` (result produced) | `blocked` (cannot produce it) | `needs-human` (a decision only a human can take) | `incoherence` (an approved contract contradicts the work; set `incoherence` to {claim, source, conflicts_with}, else `{}`).
+An artifact awaiting your own approval gate is `done`.
+{% endfor %}

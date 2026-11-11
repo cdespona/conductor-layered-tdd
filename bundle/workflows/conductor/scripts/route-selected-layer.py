@@ -12,7 +12,7 @@ from pathlib import Path
 FRONTMATTER_VALUE = re.compile(
     r"(?m)^(?P<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?P<value>.+?)\s*$"
 )
-WORK_KINDS = {"behavior", "cleanup"}
+WORK_KINDS = {"behavior", "cleanup", "infrastructure"}
 
 
 def fail(message: str) -> None:
@@ -64,7 +64,7 @@ def classify(layer_map: Path) -> dict[str, str]:
     work_kind = declared or "behavior"
     if work_kind not in WORK_KINDS:
         fail(
-            f"invalid work_kind in {todo}: {work_kind!r}; expected behavior or cleanup"
+            f"invalid work_kind in {todo}: {work_kind!r}; expected behavior, cleanup or infrastructure"
         )
     return {
         "artifact_path": str(layer_map),

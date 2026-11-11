@@ -138,3 +138,11 @@ Return structured output:
 - `red_gate_state`: recorded gate state
 - `ready_for_implementation`: true only if implementation may proceed
 - `summary`: short summary
+
+{% for star in [star_step] if star is defined and star.output is defined %}
+## Star return
+{% if star.output.brief %}Hub brief (priority): {{ star.output.brief }}
+{% endif %}Also return `outcome`, `reason`, `artifacts` (paths changed) and `incoherence`.
+`outcome`: `done` (result produced) | `blocked` (cannot produce it) | `needs-human` (a decision only a human can take) | `incoherence` (an approved contract contradicts the work; set `incoherence` to {claim, source, conflicts_with}, else `{}`).
+An artifact awaiting your own approval gate is `done`.
+{% endfor %}

@@ -27,3 +27,11 @@ For a request that needs the full workflow, the output values should have this s
 ```json
 {"route":"standard","reason":"This changes observable behavior and needs tests.","allowed_paths":[],"acceptance_criteria":""}
 ```
+
+{% for star in [star_step] if star is defined and star.output is defined %}
+## Star return
+{% if not workflow.input.request %}Request: {{ star.output.objective }}
+{% endif %}{% if star.output.brief %}Hub brief (priority): {{ star.output.brief }}
+{% endif %}Also return `outcome`, `reason`, `artifacts` (paths changed) and `incoherence`.
+`outcome`: `done` (result produced) | `blocked` (cannot produce it) | `needs-human` (a decision only a human can take) | `incoherence` (an approved contract contradicts the work; set `incoherence` to {claim, source, conflicts_with}, else `{}`).
+{% endfor %}

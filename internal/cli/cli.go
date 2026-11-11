@@ -24,6 +24,10 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runInstall(args[1:], installer.ModeInstall, stdout, stderr)
 	case "sync":
 		return runInstall(args[1:], installer.ModeSync, stdout, stderr)
+	case "run":
+		return runRun(args[1:], stdout, stderr)
+	case "resume":
+		return runResume(args[1:], stdout, stderr)
 	case "validate":
 		return runValidate(args[1:], stdout, stderr)
 	case "version", "--version", "-v":
@@ -81,19 +85,31 @@ func runValidate(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("resolve validation target: %w", err)
 	}
-	workflow := filepath.Join(absTarget, "workflows", "conductor", "layered-tdd.yaml")
-	data, err := os.ReadFile(workflow)
-	if err != nil {
-		return fmt.Errorf("read installed workflow %q: %w", workflow, err)
+	markers := map[string][]string{
+		"workflows/conductor/layered-tdd.yaml": {
+			"entry_point: preflight_tests",
+			"mode: explicit",
+			"layer_selection_gate.output.additional_input.selected_layer",
+			"layer_map_revision_gate.output.additional_input.selected_layer",
+		},
+		"workflows/conductor/layered-star.yaml": {
+			"entry_point: preflight_tests",
+			"mode: explicit",
+			"name: star_step",
+			"source: star_step.output.confirm_questions",
+		},
 	}
-	for _, marker := range []string{
-		"entry_point: preflight_tests",
-		"mode: explicit",
-		"layer_selection_gate.output.additional_input.selected_layer",
-		"layer_map_revision_gate.output.additional_input.selected_layer",
-	} {
-		if !strings.Contains(string(data), marker) {
-			return fmt.Errorf("workflow validation failed: missing %q", marker)
+	workflows := []string{"workflows/conductor/layered-tdd.yaml", "workflows/conductor/layered-star.yaml"}
+	for _, relative := range workflows {
+		workflow := filepath.Join(absTarget, filepath.FromSlash(relative))
+		data, err := os.ReadFile(workflow)
+		if err != nil {
+			return fmt.Errorf("read installed workflow %q: %w", workflow, err)
+		}
+		for _, marker := range markers[relative] {
+			if !strings.Contains(string(data), marker) {
+				return fmt.Errorf("workflow validation failed: %s is missing %q", relative, marker)
+			}
 		}
 	}
 
@@ -103,23 +119,36 @@ func runValidate(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stdout, "Conductor CLI not found; skipped schema validation.")
 		return nil
 	}
-	command := exec.Command(conductor, "validate", workflow)
-	command.Dir = absTarget
-	command.Stdout = stdout
-	command.Stderr = stderr
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("conductor validate failed: %w", err)
+	for _, relative := range workflows {
+		command := exec.Command(conductor, "validate", relative)
+		command.Dir = absTarget
+		command.Stdout = stdout
+		command.Stderr = stderr
+		if err := command.Run(); err != nil {
+			return fmt.Errorf("conductor validate %s failed: %w", relative, err)
+		}
 	}
 	fmt.Fprintln(stdout, "LTDD validation: passed")
 	return nil
 }
 
 func printUsage(output io.Writer) {
-	fmt.Fprintln(output, `ltdd installs and maintains the Conductor layered-TDD workflow.
+	fmt.Fprintln(output, `ltdd installs, maintains and runs the Conductor layered-TDD workflows
+(star: layered-star.yaml, linear: layered-tdd.yaml).
 
 Usage:
   ltdd install [--target PATH] [--provider copilot|claude-agent-sdk] [--memory-skills] [--force]
   ltdd sync [--target PATH] [--provider copilot|claude-agent-sdk] [--memory-skills] [--force]
   ltdd validate [--target PATH]
-  ltdd version`)
+  ltdd run [request...] [--flow star|linear] [--target PATH] [--plan SLUG]
+           [--no-web] [--unattended] [--save]
+           [--test-command CMD] [--lint-command CMD] [--security-command CMD]
+           [--memory-vault PATH] [--memory-namespace NS] [--memory-project SLUG]
+           [--graphify-scope DIR] [-- conductor run args...]
+  ltdd resume [--flow star|linear] [--target PATH] [--no-web] [-- conductor resume args...]
+  ltdd version
+
+Without a request, the star flow asks for the objective at its objective gate.
+Per-repository settings live in .ltdd/config.json (flag > config > workflow default);
+--save stores the flags passed.`)
 }

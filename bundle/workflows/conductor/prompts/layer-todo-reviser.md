@@ -10,14 +10,9 @@ place.
 
 Available feedback (blank entries did not occur on the active route):
 
-- layer todo gate: {% if layer_todo_gate is defined and layer_todo_gate.output is defined and layer_todo_gate.output.additional_input is defined %}{{ layer_todo_gate.output.additional_input.feedback | default("") }}{% endif %}
-- layer todo revision gate: {% if layer_todo_revision_gate is defined and layer_todo_revision_gate.output is defined and layer_todo_revision_gate.output.additional_input is defined %}{{ layer_todo_revision_gate.output.additional_input.feedback | default("") }}{% endif %}
-- red-suite evidence gate: {% if red_suite_evidence_gate is defined and red_suite_evidence_gate.output is defined and red_suite_evidence_gate.output.additional_input is defined %}{{ red_suite_evidence_gate.output.additional_input.feedback | default("") }}{% endif %}
-- test-author checkpoint: {% if agent_test_checkpoint_gate is defined and agent_test_checkpoint_gate.output is defined and agent_test_checkpoint_gate.output.additional_input is defined %}{{ agent_test_checkpoint_gate.output.additional_input.feedback | default("") }}{% endif %}
-- implementation checkpoint: {% if checkpoint_gate is defined and checkpoint_gate.output is defined and checkpoint_gate.output.additional_input is defined %}{{ checkpoint_gate.output.additional_input.feedback | default("") }}{% endif %}
-- deterministic test-author preparation: {% if test_author_preparation_gate is defined and test_author_preparation_gate.output is defined and test_author_preparation_gate.output.additional_input is defined %}{{ test_author_preparation_gate.output.additional_input.feedback | default("") }}{% endif %}
-- deterministic layer context: {% if layer_context_failure_gate is defined and layer_context_failure_gate.output is defined and layer_context_failure_gate.output.additional_input is defined %}{{ layer_context_failure_gate.output.additional_input.feedback | default("") }}{% endif %}
-- deterministic test-author result check: {% if test_author_result_gate is defined and test_author_result_gate.output is defined and test_author_result_gate.output.additional_input is defined %}{{ test_author_result_gate.output.additional_input.feedback | default("") }}{% endif %}
+{% for label, gate in [("layer todo gate", layer_todo_gate), ("layer todo revision gate", layer_todo_revision_gate), ("red-suite evidence gate", red_suite_evidence_gate), ("test-author checkpoint", agent_test_checkpoint_gate), ("implementation checkpoint", checkpoint_gate), ("deterministic test-author preparation", test_author_preparation_gate), ("deterministic layer context", layer_context_failure_gate), ("deterministic test-author result check", test_author_result_gate)] %}
+- {{ label }}: {% if gate is defined and gate.output is defined and gate.output.additional_input is defined %}{{ gate.output.additional_input.feedback | default("") }}{% endif %}
+{%- endfor %}
 
 Persist the immediately preceding Conductor gate decision and any non-empty gate
 comment in `## Decision Log`; update frontmatter only when that decision changes
@@ -55,3 +50,11 @@ Return structured output:
 - `red_gate_state`: current red-test gate state
 - `ready_for_implementation`: whether the revised todo is ready
 - `summary`: short summary of reconciled feedback
+
+{% for star in [star_step] if star is defined and star.output is defined %}
+## Star return
+{% if star.output.brief %}Hub brief (priority): {{ star.output.brief }}
+{% endif %}Also return `outcome`, `reason`, `artifacts` (paths changed) and `incoherence`.
+`outcome`: `done` (result produced) | `blocked` (cannot produce it) | `needs-human` (a decision only a human can take) | `incoherence` (an approved contract contradicts the work; set `incoherence` to {claim, source, conflicts_with}, else `{}`).
+An artifact awaiting your own approval gate is `done`.
+{% endfor %}

@@ -32,6 +32,13 @@ var coreSkills = []string{
 	"comment-writer",
 }
 
+// Workflows lists the canonical workflow entry files installed together, with
+// the number of reasoning blocks the Claude rendering expects to strip.
+var Workflows = map[string]int{
+	"workflows/conductor/layered-tdd.yaml":  20,
+	"workflows/conductor/layered-star.yaml": 21,
+}
+
 var memorySkills = []string{
 	"memory-recall",
 	"memory-capture",
@@ -168,7 +175,10 @@ func bundledFiles(includeMemory bool, provider Provider) ([]bundledFile, error) 
 		if walkErr != nil {
 			return walkErr
 		}
-		if entry.IsDir() || path == "embed.go" {
+		if entry.IsDir() && entry.Name() == "__pycache__" {
+			return fs.SkipDir
+		}
+		if entry.IsDir() || path == "embed.go" || strings.HasSuffix(path, ".pyc") {
 			return nil
 		}
 
@@ -190,8 +200,8 @@ func bundledFiles(includeMemory bool, provider Provider) ([]bundledFile, error) 
 		if err != nil {
 			return fmt.Errorf("read bundled file %q: %w", path, err)
 		}
-		if path == "workflows/conductor/layered-tdd.yaml" && provider == ProviderClaude {
-			data, err = claudeWorkflow(data)
+		if blocks, ok := Workflows[path]; ok && provider == ProviderClaude {
+			data, err = claudeWorkflow(path, data, blocks)
 			if err != nil {
 				return err
 			}
@@ -206,7 +216,7 @@ func bundledFiles(includeMemory bool, provider Provider) ([]bundledFile, error) 
 	return files, nil
 }
 
-func claudeWorkflow(source []byte) ([]byte, error) {
+func claudeWorkflow(path string, source []byte, expectedBlocks int) ([]byte, error) {
 	value := string(source)
 	replacements := [][2]string{
 		{"    provider: copilot\n", "    provider:\n      name: claude-agent-sdk\n      auth_mode: subscription\n      native_tools: claude_code\n"},
@@ -219,15 +229,15 @@ func claudeWorkflow(source []byte) ([]byte, error) {
 	}
 	for _, replacement := range replacements {
 		if !strings.Contains(value, replacement[0]) {
-			return nil, fmt.Errorf("canonical workflow is missing provider template marker %q", replacement[0])
+			return nil, fmt.Errorf("canonical workflow %s is missing provider template marker %q", path, replacement[0])
 		}
 		value = strings.ReplaceAll(value, replacement[0], replacement[1])
 	}
 	value = strings.Replace(value, "# This workflow assumes the Copilot provider and local repository tools are\n# available through Conductor/Copilot CLI.", "# This installed variant uses Claude Code through Conductor's Claude Agent SDK.\n# Sign in with `claude auth login` before running it.", 1)
 	value = strings.Replace(value, "    default_reasoning_effort: medium\n", "", 1)
 	effortBlocks := regexp.MustCompile(`(?m)^    reasoning:\n      effort: [^\n]+\n`)
-	if len(effortBlocks.FindAllString(value, -1)) != 20 {
-		return nil, fmt.Errorf("canonical workflow reasoning blocks changed; update Claude provider rendering")
+	if len(effortBlocks.FindAllString(value, -1)) != expectedBlocks {
+		return nil, fmt.Errorf("canonical workflow %s reasoning blocks changed; update Claude provider rendering", path)
 	}
 	value = effortBlocks.ReplaceAllString(value, "")
 	return []byte(value), nil
