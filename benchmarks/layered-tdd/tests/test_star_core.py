@@ -388,6 +388,40 @@ class StarStepTests(unittest.TestCase):
         step.history = ["confirm_gate"]
         self.assertEqual(step.dispatch()["next"], "requirements_gate")
 
+    def test_failed_layer_context_goes_to_the_in_spoke_gate_not_the_agent_or_hub(self):
+        for context in ("test_author_context", "implementation_context"):
+            step = self.make(self.layer_snapshot(), ["star_step", context], {context: {
+                "exit_code": 1, "stderr": "boundary table header row read as Allowed cell"}})
+            result = step.dispatch()
+            self.assertEqual(result["next"], "layer_context_failure_gate", context)
+            self.assertIn("Allowed cell", result["reason"])
+            self.assertEqual(step.snap["escalations"]["used"], 0)
+            events = [e for e in step.ledger.events if e["type"] == "context_failure_to_gate"]
+            self.assertEqual(events[0]["data"]["gate"], "layer_context_failure_gate")
+
+    def test_layer_context_failure_gate_choices_follow_the_layer_todo_rules(self):
+        back = self.make(self.layer_snapshot(), ["layer_context_failure_gate"], {
+            "layer_context_failure_gate": {"selected": "select_other_layer"}})
+        self.assertEqual(back.dispatch()["next"], "layer_selection_gate")
+        stop = self.make(self.layer_snapshot(), ["layer_context_failure_gate"], {
+            "layer_context_failure_gate": {"selected": "stop"}})
+        self.assertEqual(stop.dispatch()["next"], "stopped")
+
+    def test_failed_cleanup_context_is_blocked_and_escalates(self):
+        step = self.make(self.layer_snapshot(), ["star_step", "cleanup_implementation_context"], {
+            "cleanup_implementation_context": {"exit_code": 1, "stderr": "no cleanup layer"}})
+        self.assertEqual(step.dispatch()["next"], "hub")
+
+    def test_layer_context_steps_never_route_to_their_agent_on_failure(self):
+        workflow = (WORKFLOW_ROOT / "layered-star.yaml").read_text()
+        for context, success in (("test_author_context", "test_author_snapshot"),
+                                 ("implementation_context", "layer_snapshot"),
+                                 ("cleanup_implementation_context", "cleanup_layer_snapshot")):
+            block = workflow.split(f"  - name: {context}\n", 1)[1].split("\n  - name: ", 1)[0]
+            routes = block.split("    routes:\n", 1)[1]
+            self.assertEqual(routes.strip(), f"- to: {success}\n        when: \"{{{{ output.exit_code == 0 }}}}\"\n"
+                             "      - to: star_step", context)
+
     def test_objective_gate_loops_on_empty_answer(self):
         with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
             step = star_step.StarStep({"history": ["graphify_update_gate"], "inputs": {"request": ""}, "outputs": {}},

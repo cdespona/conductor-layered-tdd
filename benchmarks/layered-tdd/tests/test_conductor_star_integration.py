@@ -125,8 +125,10 @@ assert cancel({"status": "pending"})["status"] == "cancelled"
 class StarFixture:
     """A fresh git repository with the canonical workflow tree copied in."""
 
-    def __init__(self, test, *, incoherence_first=False, unattended_confirm=False, griller_needs_human=False):
+    def __init__(self, test, *, incoherence_first=False, unattended_confirm=False, griller_needs_human=False,
+                 broken_boundary=False):
         self.test = test
+        self.broken_boundary = broken_boundary
         self.griller_needs_human = griller_needs_human
         self.incoherence_first = incoherence_first
         self.unattended_confirm = unattended_confirm
@@ -180,11 +182,17 @@ class StarFixture:
             return contract(summary="Built CLI driver and persistent black-box acceptance")
         if name == "layer_mapper":
             write(LAYER_MAP, "---\nselected_layer: L10\n---\n# Layer map\n")
-            write(TODO, TODO_TEXT)
+            write(TODO, TODO_TEXT.replace("`src/orders.py`; `tests/layer_check.py`", "src/orders.py and its check")
+                  if self.broken_boundary else TODO_TEXT)
             return contract(artifact_path=str(LAYER_MAP), layer_count=1, recommended_next_layer="L10", summary="One layer")
         if name == "layer_todo_generator":
             return contract(artifact_path=str(TODO), selected_layer="L10", test_ownership="human-written",
                             red_gate_state="blocked", ready_for_implementation=False, summary="Layer test ready")
+        if name == "layer_todo_reviser" and self.broken_boundary:
+            self.test.assertIn("- deterministic layer context: Backtick every boundary path", prompt)
+            write(TODO, TODO_TEXT)
+            return contract(artifact_path=str(TODO), selected_layer="L10", test_ownership="human-written",
+                            red_gate_state="blocked", ready_for_implementation=False, summary="Boundary fixed")
         if name == "layer_todo_reviser":
             self.test.assertIn("Hub brief (priority):", prompt)
             self.test.assertIn("second cancellation returns 409", prompt)
@@ -234,6 +242,7 @@ class StarFixture:
         "layer_selection_gate": ("selected", {"selected_layer": "L10"}),
         "layer_todo_gate": ("verify_existing_test", {"feedback": "Use layer check"}),
         "layer_todo_revision_gate": ("verify_existing_test", {"feedback": "409 contract aligned"}),
+        "layer_context_failure_gate": ("revise", {"feedback": "Backtick every boundary path"}),
         "red_suite_evidence_gate": ("confirm_red", {"feedback": "Expected cancellation failure"}),
         "layer_approval_gate": ("approve_final_review", {"feedback": "Review slice"}),
         "memory_gate": ("skip", {"feedback": "Smoke fixture"}),
@@ -309,6 +318,24 @@ class ConductorStarIntegration(unittest.TestCase):
             self.assertEqual(fixture.steps[1:4], ["requirements_griller", "requirements_gate", "fast_triage"])
             ledger, events = ledger_events()
             self.assertIn("needs_human_to_gate", events)
+            self.assertNotIn("escalation", events)
+
+    def test_failed_layer_context_reaches_its_gate_and_a_revised_todo_recovers(self):
+        """L10 regression: an unparseable boundary must never reach the implementor or the hub."""
+        with tempfile.TemporaryDirectory() as directory, working_directory(Path(directory)):
+            fixture = StarFixture(self, broken_boundary=True)
+            result = asyncio.run(fixture.run(fixture.setup()))
+            self.assertEqual(result["status"], "complete")
+            self.assertNotIn("hub", fixture.steps)
+            self.assertEqual(fixture.steps[fixture.steps.index("red_suite_evidence_gate"):][:6], [
+                "red_suite_evidence_gate", "layer_context_failure_gate", "layer_todo_reviser",
+                "layer_todo_revision_gate", "red_suite_evidence_gate", "implementor",
+            ])
+            self.assertEqual(fixture.implementor_calls, 1)
+            ledger, events = ledger_events()
+            failure = next(e for e in ledger.events if e["type"] == "context_failure_to_gate")
+            self.assertEqual(failure["data"]["step"], "implementation_context")
+            self.assertIn("boundary cell", failure["data"]["reason"])
             self.assertNotIn("escalation", events)
 
     def test_incoherence_escalates_to_hub_and_confirmed_backtrack_recovers(self):

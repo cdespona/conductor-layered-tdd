@@ -323,6 +323,7 @@ agents:
       - layer_todo_gate.output?
       - layer_todo_reviser.output?
       - layer_todo_revision_gate.output?
+      - layer_context_failure_gate.output?
       - test_author_preparer.output?
       - test_author_context.output?
       - test_author_snapshot.output?
@@ -412,8 +413,9 @@ agents:
             'layer_todo_gate': (layer_todo_gate.output if layer_todo_gate is defined else none),
             'layer_todo_reviser': (layer_todo_reviser.output if layer_todo_reviser is defined else none),
             'layer_todo_revision_gate': (layer_todo_revision_gate.output if layer_todo_revision_gate is defined else none),
+            'layer_context_failure_gate': (layer_context_failure_gate.output if layer_context_failure_gate is defined else none),
             'test_author_preparer': (test_author_preparer.output if test_author_preparer is defined else none),
-            'test_author_context': ({'todo_path': test_author_context.output.todo_path | default(none), 'layer_size': test_author_context.output.layer_size | default(none), 'selected_layer': test_author_context.output.selected_layer | default(none)} if test_author_context is defined else none),
+            'test_author_context': ({'todo_path': test_author_context.output.todo_path | default(none), 'layer_size': test_author_context.output.layer_size | default(none), 'selected_layer': test_author_context.output.selected_layer | default(none), 'exit_code': test_author_context.output.exit_code | default(none), 'stderr': test_author_context.output.stderr | default(none)} if test_author_context is defined else none),
             'test_author_snapshot': (test_author_snapshot.output if test_author_snapshot is defined else none),
             'agent_test_author': (agent_test_author.output if agent_test_author is defined else none),
             'test_author_completion_recorder': (test_author_completion_recorder.output if test_author_completion_recorder is defined else none),
@@ -421,7 +423,7 @@ agents:
             'red_suite_evidence_recorder': ({'summary': red_suite_evidence_recorder.output.summary | default(none)} if red_suite_evidence_recorder is defined else none),
             'red_suite_evidence_gate': (red_suite_evidence_gate.output if red_suite_evidence_gate is defined else none),
             'red_gate_decision_recorder': (red_gate_decision_recorder.output if red_gate_decision_recorder is defined else none),
-            'implementation_context': ({'todo_path': implementation_context.output.todo_path | default(none), 'layer_size': implementation_context.output.layer_size | default(none), 'selected_layer': implementation_context.output.selected_layer | default(none)} if implementation_context is defined else none),
+            'implementation_context': ({'todo_path': implementation_context.output.todo_path | default(none), 'layer_size': implementation_context.output.layer_size | default(none), 'selected_layer': implementation_context.output.selected_layer | default(none), 'exit_code': implementation_context.output.exit_code | default(none), 'stderr': implementation_context.output.stderr | default(none)} if implementation_context is defined else none),
             'layer_snapshot': (layer_snapshot.output if layer_snapshot is defined else none),
             'implementor': (implementor.output if implementor is defined else none),
             'verification_tests': ({'exit_code': verification_tests.output.exit_code | default(none), 'failed_count': verification_tests.output.failed_count | default(none)} if verification_tests is defined else none),
@@ -439,7 +441,7 @@ agents:
             'cleanup_baseline_tests': ({'exit_code': cleanup_baseline_tests.output.exit_code | default(none), 'failed_count': cleanup_baseline_tests.output.failed_count | default(none)} if cleanup_baseline_tests is defined else none),
             'cleanup_baseline_lint': ({'exit_code': cleanup_baseline_lint.output.exit_code | default(none), 'failed_count': cleanup_baseline_lint.output.failed_count | default(none)} if cleanup_baseline_lint is defined else none),
             'cleanup_baseline_security': ({'exit_code': cleanup_baseline_security.output.exit_code | default(none), 'failed_count': cleanup_baseline_security.output.failed_count | default(none)} if cleanup_baseline_security is defined else none),
-            'cleanup_implementation_context': ({'todo_path': cleanup_implementation_context.output.todo_path | default(none), 'layer_size': cleanup_implementation_context.output.layer_size | default(none), 'selected_layer': cleanup_implementation_context.output.selected_layer | default(none)} if cleanup_implementation_context is defined else none),
+            'cleanup_implementation_context': ({'todo_path': cleanup_implementation_context.output.todo_path | default(none), 'layer_size': cleanup_implementation_context.output.layer_size | default(none), 'selected_layer': cleanup_implementation_context.output.selected_layer | default(none), 'exit_code': cleanup_implementation_context.output.exit_code | default(none), 'stderr': cleanup_implementation_context.output.stderr | default(none)} if cleanup_implementation_context is defined else none),
             'cleanup_layer_snapshot': (cleanup_layer_snapshot.output if cleanup_layer_snapshot is defined else none),
             'cleanup_implementor': (cleanup_implementor.output if cleanup_implementor is defined else none),
             'cleanup_verification_tests': ({'exit_code': cleanup_verification_tests.output.exit_code | default(none), 'failed_count': cleanup_verification_tests.output.failed_count | default(none)} if cleanup_verification_tests is defined else none),
@@ -503,6 +505,7 @@ agents:
           - cleanup_plan_revision_gate
           - layer_approval_gate
           - cleanup_approval_gate
+          - layer_context_failure_gate
     routes:
       - to: requirements_griller
         when: "{{ output.next == 'requirements_griller' }}"
@@ -592,6 +595,8 @@ agents:
         when: "{{ output.next == 'layer_approval_gate' }}"
       - to: cleanup_approval_gate
         when: "{{ output.next == 'cleanup_approval_gate' }}"
+      - to: layer_context_failure_gate
+        when: "{{ output.next == 'layer_context_failure_gate' }}"
       - to: failed
 
   - name: hub
@@ -1686,6 +1691,7 @@ agents:
       - layer_todo_gate.output?
       - layer_todo_revision_gate.output?
       - red_suite_evidence_gate.output?
+      - layer_context_failure_gate.output?
       - star_step.output.brief?
     prompt: !file prompts/layer-todo-reviser.md
     output:
@@ -1762,6 +1768,32 @@ agents:
         value: stop
         route: star_step
 
+  - name: layer_context_failure_gate
+    type: human_gate
+    prompt: |
+      The deterministic layer context could not be built from the active layer
+      todo, so no agent runs on a partial handoff. Revise the todo so its
+      boundary section starts with one machine-readable permission table.
+
+      Active layer todo: `{{ layer_todo_generator.output.artifact_path }}`
+      Error: {{ star_step.output.reason }}
+    options:
+      - label: Revise the current layer todo.
+        value: revise
+        prompt_for: feedback
+        route: layer_todo_reviser
+      - label: Return to layer selection.
+        value: select_other_layer
+        route: star_step
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
+
   # ---------------------------------------------------------------------------
   # Spoke: test-author
   # ---------------------------------------------------------------------------
@@ -1803,6 +1835,8 @@ agents:
       - "{{ star_step.output.objective }}"
     routes:
       - to: test_author_snapshot
+        when: "{{ output.exit_code == 0 }}"
+      - to: star_step
 
   - name: test_author_snapshot
     type: script
@@ -2031,6 +2065,8 @@ agents:
       - "{{ star_step.output.objective }}"
     routes:
       - to: layer_snapshot
+        when: "{{ output.exit_code == 0 }}"
+      - to: star_step
 
   - name: layer_snapshot
     type: script
@@ -2540,6 +2576,8 @@ agents:
       - "{{ star_step.output.objective }}"
     routes:
       - to: cleanup_layer_snapshot
+        when: "{{ output.exit_code == 0 }}"
+      - to: star_step
 
   - name: cleanup_layer_snapshot
     type: script

@@ -68,6 +68,12 @@ AGENT_GATES = {
     "cleanup_reviewer": "cleanup_approval_gate",
 }
 GATE_ACTIONS_REDIRECT = {"redirect"}
+# Deterministic layer-context steps whose failure means the active layer todo
+# needs fixing: the human decides at the in-spoke gate, not the hub.
+CONTEXT_FAILURE_GATES = {
+    "test_author_context": "layer_context_failure_gate",
+    "implementation_context": "layer_context_failure_gate",
+}
 
 
 def load_script(name: str, filename: str):
@@ -514,6 +520,12 @@ class StarStep:
             from_gate(step, "layer.todo_decision")
             return result
 
+        if step in CONTEXT_FAILURE_GATES or step == "cleanup_implementation_context":
+            error = str(o(step).get("stderr") or "").strip() or f"exit code {o(step).get('exit_code')}"
+            result.update(outcome="blocked", reason=f"{step} failed: {shorten(error, 1500)}",
+                          gate=CONTEXT_FAILURE_GATES.get(step, ""))
+            return result
+
         if spoke == "test-author":
             if step == "test_author_preparer":
                 result.update(outcome="blocked", reason=f"test-author handoff failed: {o(step).get('errors')}")
@@ -956,6 +968,10 @@ class StarStep:
         self.event("spoke_returned", spoke=spoke, step=step, outcome=outcome, decision=decision,
                    reason=shorten(result["reason"], 400), artifacts=shorten(result["artifacts"]),
                    layer=self.facts.current_layer, brief_used=bool(entered.get("brief")))
+        if result.get("gate"):
+            self.event("context_failure_to_gate", spoke=spoke, step=step, gate=result["gate"],
+                       reason=shorten(result["reason"], 400))
+            return {"next": result["gate"], "spoke": spoke, "reason": result["reason"]}
         gate = self.own_gate(step, outcome)
         if gate:
             self.event("needs_human_to_gate", spoke=spoke, step=step, gate=gate, reason=shorten(result["reason"], 400))

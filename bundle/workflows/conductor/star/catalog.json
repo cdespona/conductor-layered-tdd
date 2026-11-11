@@ -83,7 +83,7 @@
       "entry": "selected_layer_context",
       "reopen_entry": "layer_todo_reviser",
       "default_next": "test-author",
-      "steps": ["selected_layer_context", "layer_todo_generator", "layer_todo_gate", "layer_todo_reviser", "layer_todo_revision_gate"],
+      "steps": ["selected_layer_context", "layer_todo_generator", "layer_todo_gate", "layer_todo_reviser", "layer_todo_revision_gate", "layer_context_failure_gate"],
       "preconditions": "A behavior or infrastructure layer is selected.",
       "requires": {"in": ["layer.work_kind", ["behavior", "infrastructure"]]}
     },
