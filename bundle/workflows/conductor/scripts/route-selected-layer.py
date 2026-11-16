@@ -6,7 +6,11 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import layer_matrix  # noqa: E402
 
 
 FRONTMATTER_VALUE = re.compile(
@@ -33,6 +37,14 @@ def frontmatter_value(content: str, key: str) -> str:
 
 def selected_todo(layer_map: Path, selected_layer: str) -> Path:
     layers = layer_map.parent / "layers"
+    # name-layer-todos.py makes layers/<id>.md canonical; older maps fall back
+    # to the matrix's "Todo file" column and then to the legacy patterns.
+    canonical = layers / layer_matrix.todo_name(selected_layer)
+    if canonical.is_file():
+        return canonical
+    from_matrix = layer_matrix.todo_from_matrix(layer_map, selected_layer)
+    if from_matrix is not None:
+        return from_matrix
     names = [selected_layer]
     if not selected_layer.endswith(".md"):
         names.extend([f"{selected_layer}.md", f"{selected_layer}.todo.md"])

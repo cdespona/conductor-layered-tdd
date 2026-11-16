@@ -39,7 +39,7 @@ The layer map must include:
 - why each layer matters
 - implementation boundary for each layer
 - recommended order
-- skeleton todo filename for each layer
+- skeleton todo filename for each layer: always `layers/<layer id>.md`
 - open risks
 
 Size each layer before human approval. Set `layer_size: small` in its skeleton
@@ -88,6 +88,11 @@ Artifact style:
 Cleanup skeletons must also name the proposed replacement, migration
 dependencies, preliminary repository-relative removal targets, existing
 preservation tests/evidence, and bounded remaining-reference patterns/roots.
+
+Write each skeleton todo at exactly `layers/<layer id>.md` and put that path in
+the Layer Matrix `Todo file` column. Layer ids use only letters, digits, `.`,
+`_` and `-`. A workflow script enforces these names after mapping; do not
+invent another naming pattern.
 
 After revision, the active todo filenames in the layer map and the non-superseded files in `layers/` must match exactly. Do not leave stale draft todos for layers that were removed by human feedback.
 

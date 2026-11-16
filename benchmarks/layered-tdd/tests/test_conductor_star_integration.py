@@ -35,7 +35,7 @@ PRODUCT = "src/orders.py"
 LAYER_TEST = "tests/layer_check.py"
 BASELINE = "def cancel(order):\n    return order\n"
 PLAN = Path(".github/plans/smoke")
-TODO = PLAN / "layers/L10.todo.md"
+TODO = PLAN / "layers/L10.md"
 LAYER_MAP = PLAN / "01-layer-map.md"
 REGRESSION = "test ! -f tests/layer_check.py || python3 tests/layer_check.py"
 CHECK = "python3 -c 'compile(open(\"src/orders.py\").read(), \"orders\", \"exec\")'"
@@ -181,7 +181,7 @@ class StarFixture:
             write("tests/acceptance.py", ACCEPTANCE_TEST)
             return contract(summary="Built CLI driver and persistent black-box acceptance")
         if name == "layer_mapper":
-            write(LAYER_MAP, "---\nselected_layer: L10\n---\n# Layer map\n")
+            write(LAYER_MAP, "---\nselected_layer: L10\n---\n# Layer map\n\n## Layer Matrix\n\n| Order | Layer ID | Todo file |\n| --- | --- | --- |\n| 1 | `L10` | `layers/L10.md` |\n")
             write(TODO, TODO_TEXT.replace("`src/orders.py`; `tests/layer_check.py`", "src/orders.py and its check")
                   if self.broken_boundary else TODO_TEXT)
             return contract(artifact_path=str(LAYER_MAP), layer_count=1, recommended_next_layer="L10", summary="One layer")
@@ -204,7 +204,7 @@ class StarFixture:
             if self.incoherence_first and self.implementor_calls == 1:
                 return contract(outcome="incoherence", reason="Protected HTTP contract test expects 409",
                                 incoherence={"claim": "second cancellation returns 200 unchanged",
-                                             "source": "layers/L10.todo.md",
+                                             "source": "layers/L10.md",
                                              "conflicts_with": "tests/http_contract_test: expects 409"},
                                 selected_layer="L10", files_modified=[], checkpoint_required=False,
                                 checkpoint_summary="", summary="Stopped on contract incoherence")
