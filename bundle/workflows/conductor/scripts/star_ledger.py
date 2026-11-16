@@ -56,6 +56,8 @@ def empty_snapshot() -> dict[str, Any]:
         "hub_vetoes": 0,
         "visits": [],
         "incoherences": [],
+        "rulings": [],
+        "ruling_replays": {},
         "last": {},
         "entered": None,
         "objective_attempts": 0,

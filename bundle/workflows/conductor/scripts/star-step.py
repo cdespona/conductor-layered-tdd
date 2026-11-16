@@ -25,6 +25,7 @@ sys.dont_write_bytecode = True
 import importlib.util  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
+import re  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -68,6 +69,14 @@ AGENT_GATES = {
     "cleanup_reviewer": "cleanup_approval_gate",
 }
 GATE_ACTIONS_REDIRECT = {"redirect"}
+# Files an incoherence cites ("internal/x_test.go:6-7", ".benchmark/request.md").
+# A conflict between the same files as a human ruling is the same conflict.
+FILE_TOKEN = re.compile(r"[\w.-]+(?:/[\w.-]+)*\.[A-Za-z][A-Za-z0-9]{1,5}\b")
+
+
+def conflict_files(incoherence: dict[str, Any] | None) -> set[str]:
+    text = " ".join(str((incoherence or {}).get(key) or "") for key in ("source", "conflicts_with"))
+    return {Path(token).name for token in FILE_TOKEN.findall(text)}
 # Deterministic layer todo naming after mapping or revision: a failure goes to
 # its in-spoke gate so the map is revised, never to the hub.
 TODO_NAMING_STEPS = {"layer_todo_names", "layer_map_revision_todo_names"}
@@ -819,6 +828,7 @@ class StarStep:
             "facts": facts,
             "stale_facts": stale,
             "open_incoherences": [i for i in self.snap["incoherences"] if i.get("status") == "open"],
+            "human_rulings": self.snap.setdefault("rulings", []),
             "open_violation": self.snap.get("violation"),
             "recent_events": [{"type": e["type"], **{k: shorten(v, 200) for k, v in e["data"].items()}} for e in self.ledger.events[-10:]],
             "catalog": self.catalog.describe(),
@@ -950,6 +960,7 @@ class StarStep:
         if choice is None:
             self.event("human_redirect", text=shorten(answer, 400))
             self.snap["pending"] = None
+            self.record_ruling(answer)
             return self.escalate("free_text", "human wrote free text at the confirmation gate", human_text=answer)
         action = choice["action"]
         if action == "stop":
@@ -1000,12 +1011,16 @@ class StarStep:
         if decision in GATE_ACTIONS_REDIRECT:
             text = result["text"].strip()
             self.event("human_redirect", spoke=spoke, step=step, text=shorten(text, 400))
+            self.record_ruling(text)
             return self.escalate("free_text", f"human redirect at {step}", human_text=text)
         if outcome == "incoherence":
             item = {"id": f"INC{len(self.snap['incoherences']) + 1}", "status": "open", "spoke": spoke,
                     "layer": self.facts.current_layer, **(result["incoherence"] or {})}
             self.snap["incoherences"].append(item)
             self.event("incoherence_detected", **{k: shorten(v, 400) for k, v in item.items()})
+            replay = self.replay_ruling(spoke, item)
+            if replay is not None:
+                return replay
         if outcome != "done":
             return self.escalate("outcome", f"{spoke} returned {outcome}", outcome=outcome, reason=result["reason"],
                                  incoherence=result["incoherence"])
@@ -1014,6 +1029,61 @@ class StarStep:
                 item["status"] = "resolved"
                 self.event("incoherence_resolved", id=item["id"], spoke=spoke)
         return self.route_after(spoke)
+
+    # -- human rulings ----------------------------------------------------------
+    def record_ruling(self, text: str) -> None:
+        """Keep the human's free text as a durable ruling on every open incoherence."""
+        open_items = [i for i in self.snap["incoherences"] if i.get("status") == "open"]
+        if not text or not open_items:
+            return
+        files = sorted(set().union(*(conflict_files(i) for i in open_items)))
+        rulings = self.snap.setdefault("rulings", [])
+        if any(r["text"] == text and r["files"] == files for r in rulings):
+            return
+        ruling = {"id": f"R{len(rulings) + 1}", "text": text, "files": files,
+                  "incoherences": [i["id"] for i in open_items],
+                  "claim": str(open_items[0].get("claim") or ""),
+                  "conflicts_with": str(open_items[0].get("conflicts_with") or "")}
+        rulings.append(ruling)
+        self.event("ruling_recorded", id=ruling["id"], files=files, incoherences=ruling["incoherences"],
+                   text=shorten(text, 400))
+
+    def matching_ruling(self, incoherence: dict[str, Any]) -> dict[str, Any] | None:
+        files = conflict_files(incoherence)
+        for ruling in reversed(self.snap.setdefault("rulings", [])):
+            if len(ruling["files"]) >= 2 and set(ruling["files"]) <= files:
+                return ruling
+        return None
+
+    def replay_ruling(self, spoke: str, item: dict[str, Any]) -> dict[str, Any] | None:
+        """Send an already-ruled conflict back to its spoke once instead of escalating."""
+        ruling = self.matching_ruling(item)
+        if ruling is None:
+            return None
+        item["ruling"] = ruling["id"]
+        replays = self.snap.setdefault("ruling_replays", {})
+        key = f"{ruling['id']}:{spoke}:{self.facts.current_layer or ''}"
+        if replays.get(key) or not star_guard.legal(spoke, self.snap, self.catalog, self.environment):
+            # The same spoke raised it again after seeing the ruling: a human decides.
+            return None
+        replays[key] = 1
+        item["status"] = "ruled"
+        self.event("incoherence_already_ruled", id=item["id"], ruling=ruling["id"], spoke=spoke)
+        brief = (f"The human already ruled on this conflict ({ruling['id']}): {ruling['text']} "
+                 "This ruling supersedes the original request and any artifact that contradicts it. "
+                 "Apply it and finish your work; return `incoherence` only for a different conflict.")
+        return self.enter(spoke, proposer="ruling", brief=brief, rule=ruling["id"])
+
+    def rulings_text(self) -> str:
+        rulings = self.snap.setdefault("rulings", [])
+        if not rulings:
+            return ""
+        lines = ["Human rulings (they supersede the original request and any artifact that contradicts them; "
+                 "apply them and never re-raise them as an incoherence):"]
+        for ruling in rulings:
+            lines.append(f"- {ruling['id']}: {shorten(ruling['text'], 600)} "
+                         f"(conflict: {shorten(ruling['claim'], 200)} vs {shorten(ruling['conflicts_with'], 200)})")
+        return "\n".join(lines)
 
     def own_gate(self, step: str, outcome: str) -> str:
         """In-spoke approval gate that should receive a needs-human outcome from ``step``."""
@@ -1094,6 +1164,7 @@ class StarStep:
         result.setdefault("confirm_questions", [])
         result.setdefault("hub_input", {})
         result.setdefault("spoke", "")
+        result["rulings"] = self.rulings_text()
         result.update(objective=self.snap.get("objective", ""), ledger_path=str(self.ledger.path), ledger_sha=sha,
                       status=self.snap.get("status", ""), plan_dir=self.snap.get("plan_dir", ""))
         if halted:
