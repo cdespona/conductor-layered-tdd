@@ -26,17 +26,24 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def paths(values):
+def instruction_path(value):
+    path = PurePosixPath(value)
+    return (value.startswith(("workflows/", ".github/instructions/", ".github/skills/"))
+            or path.name in {"AGENTS.md", "CLAUDE.md"}
+            or value == ".github/copilot-instructions.md")
+
+
+def paths(values, forbidden=False):
+    # Forbidden files only ever narrow the scope, so naming instruction or
+    # workflow files there is a safe, explicit reminder rather than a grant.
     if not isinstance(values, list) or not all(isinstance(v, str) and v for v in values):
         raise ValueError("file scope must be an array of exact repository-relative paths")
     root = Path.cwd().resolve()
     for value in values:
         path = PurePosixPath(value)
         if (path.is_absolute() or ".." in path.parts or value != path.as_posix()
-                or any(c in value for c in "*?[]") or value.startswith((".git/", "workflows/"))
-                or path.name in {"AGENTS.md", "CLAUDE.md"}
-                or value.startswith((".github/instructions/", ".github/skills/"))
-                or value == ".github/copilot-instructions.md"
+                or any(c in value for c in "*?[]") or value.startswith(".git/")
+                or (not forbidden and instruction_path(value))
                 or not (root / value).resolve().is_relative_to(root)
                 or (root / value).is_symlink() or (root / value).is_dir()):
             raise ValueError(f"invalid acceptance file scope: {value}")
@@ -56,7 +63,7 @@ def read_plan(path):
         if not isinstance(plan.get(key), str) or not plan[key].strip():
             raise ValueError(f"missing acceptance design field: {key}")
     for key in ("allowed_files", "protected_files", "forbidden_files"):
-        plan[key] = paths(plan.get(key))
+        plan[key] = paths(plan.get(key), forbidden=key == "forbidden_files")
     if set(plan["allowed_files"]) & set(plan["forbidden_files"]):
         raise ValueError("allowed and forbidden files overlap")
     if plan["mode"] == "behavior":

@@ -694,6 +694,10 @@ agents:
       - slice_acceptance_validation_gate.output?
       - slice_acceptance_blocked_gate.output?
       - slice_acceptance_final_gate.output?
+      - slice_acceptance_prepare.output?
+      - slice_acceptance_verify.output?
+      - slice_acceptance_approve.output?
+      - slice_acceptance_final.output?
     prompt: !file prompts/slice-acceptance-planner.md
     output:
       artifact_path:
