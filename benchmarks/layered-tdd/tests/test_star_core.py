@@ -292,6 +292,82 @@ class StarStepTests(unittest.TestCase):
         self.assertEqual(result["hub_input"]["escalation"]["trigger"], "free_text")
         self.assertEqual(step.snap["escalations"]["used"], 1)
 
+    # Strings from the 2026-11-16 contract-incoherence star run.
+    GRILLER_CONFLICT = {"claim": "Repeated cancellation returns 409 Conflict.",
+                        "source": "internal/httpapi/cancel_contract_test.go:6-7,42-45",
+                        "conflicts_with": ".benchmark/request.md:10,16-18 \u2014 repeated cancellation returns 200."}
+    REVIEWER_CONFLICT = {"claim": "A repeated POST /orders/{id}/cancel must return 409 Conflict.",
+                         "source": ".github/plans/b/02-slice-acceptance.json; internal/httpapi/cancel_contract_test.go:30-45",
+                         "conflicts_with": ".benchmark/request.md:12-18 requires an unchanged, successful repeat."}
+    TODO_CONFLICT = {"claim": "The fixed HTTP rule calls for 200 JSON, while the approved contract requires 409.",
+                     "source": ".benchmark/request.md:10-11,16-18",
+                     "conflicts_with": "internal/httpapi/cancel_contract_test.go:6-7,42-45"}
+    RULING = "The contract test rules: a repeated cancellation returns 409. Correct the requirement."
+
+    def ruled_step(self, history, outputs):
+        step = self.make(self.layer_snapshot(), history, outputs)
+        step.snap["incoherences"] = [{"id": "INC1", "status": "open", "spoke": "requirements", **self.GRILLER_CONFLICT}]
+        step.record_ruling(self.RULING)
+        step.snap["incoherences"][0]["status"] = "resolved"
+        return step
+
+    def test_conflict_files_ignore_line_numbers_and_prose(self):
+        self.assertEqual(star_step.conflict_files(self.GRILLER_CONFLICT), {"cancel_contract_test.go", "request.md"})
+        self.assertEqual(star_step.conflict_files(self.REVIEWER_CONFLICT),
+                         {"02-slice-acceptance.json", "cancel_contract_test.go", "request.md"})
+        self.assertEqual(star_step.conflict_files({"source": "e.g. the request", "conflicts_with": "i.e. none"}), set())
+
+    def test_free_text_on_an_open_incoherence_becomes_a_durable_ruling(self):
+        step = self.make(self.layer_snapshot(), ["confirm_gate"], {"confirm_gate": {"answers": {"decision": self.RULING}}})
+        step.snap["incoherences"] = [{"id": "INC1", "status": "open", "spoke": "requirements", **self.GRILLER_CONFLICT}]
+        step.snap["pending"] = {"kind": "proposal", "text": "", "choices": {"Stop the run": {"action": "stop"}}}
+        result = step.dispatch()
+        self.assertEqual(result["next"], "hub")
+        ruling = step.snap["rulings"][0]
+        self.assertEqual((ruling["id"], ruling["text"], ruling["incoherences"]), ("R1", self.RULING, ["INC1"]))
+        self.assertEqual(result["hub_input"]["human_rulings"][0]["text"], self.RULING)
+        self.assertIn("ruling_recorded", [e["type"] for e in step.ledger.events])
+
+    def test_free_text_without_an_open_incoherence_is_not_a_ruling(self):
+        step = self.make(self.layer_snapshot(), ["confirm_gate"], {"confirm_gate": {"answers": {"decision": "go back"}}})
+        step.snap["pending"] = {"kind": "proposal", "text": "", "choices": {"Stop the run": {"action": "stop"}}}
+        step.dispatch()
+        self.assertEqual(step.snap["rulings"], [])
+
+    def test_every_star_step_output_carries_the_rulings_for_agents(self):
+        step = self.ruled_step(["star_step"], {})
+        self.assertIn(self.RULING, step.rulings_text())
+        self.assertIn("supersede the original request", step.rulings_text())
+        self.assertEqual(self.make(self.layer_snapshot(), ["star_step"]).rulings_text(), "")
+
+    def test_a_ruled_conflict_raised_again_goes_back_to_its_spoke_with_the_ruling(self):
+        for agent, conflict in (("layer_todo_reviser", self.TODO_CONFLICT), ("layer_todo_generator", self.REVIEWER_CONFLICT)):
+            with self.subTest(agent=agent):
+                step = self.ruled_step(["star_step", agent], {agent: {
+                    "artifact_path": "t.md", "outcome": "incoherence", "reason": "request says 200", "incoherence": conflict}})
+                result = step.dispatch()
+                self.assertEqual(result["spoke"], "layer-todo")
+                self.assertIn(self.RULING, result["brief"])
+                self.assertEqual(step.snap["escalations"]["used"], 0)
+                self.assertEqual(step.snap["incoherences"][-1]["status"], "ruled")
+                self.assertIn("incoherence_already_ruled", [e["type"] for e in step.ledger.events])
+
+    def test_raising_a_ruled_conflict_twice_from_the_same_spoke_escalates(self):
+        outputs = {"layer_todo_reviser": {"artifact_path": "t.md", "outcome": "incoherence", "reason": "r",
+                                          "incoherence": self.TODO_CONFLICT}}
+        step = self.ruled_step(["star_step", "layer_todo_reviser"], outputs)
+        step.dispatch()
+        again = self.make(step.snap, ["star_step", "layer_todo_reviser"], outputs)
+        result = again.dispatch()
+        self.assertEqual(result["next"], "hub")
+        self.assertEqual(result["hub_input"]["human_rulings"][0]["id"], "R1")
+
+    def test_a_different_conflict_still_escalates(self):
+        step = self.ruled_step(["star_step", "layer_todo_reviser"], {"layer_todo_reviser": {
+            "artifact_path": "t.md", "outcome": "incoherence", "reason": "r",
+            "incoherence": {"claim": "x", "source": "internal/orders/order.go:3", "conflicts_with": ".benchmark/request.md:4"}}})
+        self.assertEqual(step.dispatch()["next"], "hub")
+
     def test_hub_veto_returns_to_hub_once_then_human(self):
         snap = self.layer_snapshot()
         snap["facts"]["L[L10].red_gate_allowed"]["stale"] = True
@@ -477,6 +553,17 @@ class StarStepTests(unittest.TestCase):
             result = done.run()
             self.assertEqual(result["next"], "requirements_griller")
             self.assertEqual(result["objective"], "Cancel orders")
+
+
+class RulingWiringTests(unittest.TestCase):
+    def test_every_agent_that_gets_the_hub_brief_also_gets_the_rulings(self):
+        workflow = (WORKFLOW_ROOT / "layered-star.yaml").read_text()
+        self.assertEqual(workflow.count("- star_step.output.brief?"), workflow.count("- star_step.output.rulings?"))
+        for prompt in (WORKFLOW_ROOT / "prompts").glob("*.md"):
+            text = prompt.read_text()
+            if "Hub brief (priority)" in text:
+                self.assertIn("{% if star.output.rulings %}{{ star.output.rulings }}", text, prompt.name)
+        self.assertIn("`human_rulings`", (WORKFLOW_ROOT / "prompts" / "star-hub.md").read_text())
 
 
 class LayerDiffLedgerProtection(unittest.TestCase):

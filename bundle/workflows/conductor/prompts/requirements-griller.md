@@ -85,6 +85,7 @@ Return structured output:
 ## Star return
 {% if not workflow.input.request %}Request: {{ star.output.objective }}
 {% endif %}{% if star.output.brief %}Hub brief (priority): {{ star.output.brief }}
+{% endif %}{% if star.output.rulings %}{{ star.output.rulings }}
 {% endif %}Also return `outcome`, `reason`, `artifacts` (paths changed) and `incoherence`.
 `outcome`: `done` (result produced) | `blocked` (cannot produce it) | `needs-human` (a decision only a human can take) | `incoherence` (an approved contract contradicts the work; set `incoherence` to {claim, source, conflicts_with}, else `{}`).
 An artifact awaiting your own approval gate is `done`.

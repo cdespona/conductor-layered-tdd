@@ -27,6 +27,10 @@ Hard rules:
   revising the spoke that owns the contradicted artifact (for example
   `layer-todo` for a layer contract, `acceptance-design` for the slice
   acceptance contract, `requirements` for the requirements).
+- `human_rulings` are the human's decisions on earlier incoherences. They
+  supersede the original request and any artifact that contradicts them. Never
+  propose a brief that contradicts a ruling; when a spoke re-raises a ruled
+  conflict, send it back with a brief that applies the ruling.
 - To retry the same spoke, propose it again with a `brief` that says what to do
   differently.
 - When the human wrote free text, interpret it literally and say how you

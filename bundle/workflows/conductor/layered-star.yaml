@@ -674,6 +674,7 @@ agents:
       - graphify_refresh.output.summary?
       - star_step.output.objective
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/requirements-griller.md
     output:
       artifact_path:
@@ -743,6 +744,7 @@ agents:
     input:
       - requirements_griller.output.artifact_path
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/requirements-reviser.md
     output:
       artifact_path:
@@ -816,6 +818,7 @@ agents:
       - requirements_griller.output.artifact_path?
       - star_step.output.objective
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/fast-triage.md
     output:
       route:
@@ -865,6 +868,7 @@ agents:
       - fast_approval_gate.output?
       - star_step.output.objective
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/fast-implementor.md
     output:
       needs_normal_path:
@@ -1017,6 +1021,7 @@ agents:
     input:
       - requirements_griller.output.artifact_path
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/slice-selection-reviser.md
     output:
       artifact_path:
@@ -1079,6 +1084,7 @@ agents:
     input:
       - requirements_griller.output.artifact_path
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/slice-run-starter.md
     output:
       artifact_path:
@@ -1145,6 +1151,7 @@ agents:
     input:
       - slice_run_starter.output.artifact_path
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/slice-requirements-reviser.md
     output:
       artifact_path:
@@ -1212,6 +1219,7 @@ agents:
       - slice_acceptance_design_gate.output?
       - slice_acceptance_validation_gate.output?
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/slice-acceptance-planner.md
     output:
       artifact_path:
@@ -1287,6 +1295,7 @@ agents:
     input:
       - slice_acceptance_planner.output.artifact_path
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/slice-acceptance-builder.md
     output:
       summary:
@@ -1381,6 +1390,7 @@ agents:
       - graphify_status.output.graph_available?
       - graphify_refresh.output.graph_available?
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/layer-mapper.md
     output:
       artifact_path:
@@ -1451,6 +1461,7 @@ agents:
       - layer_map_revision_todo_names.output?
       - layer_todo_naming_gate.output?
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/layer-map-reviser.md
     output:
       artifact_path:
@@ -1667,6 +1678,7 @@ agents:
       - graphify_status.output.graph_available?
       - graphify_refresh.output.graph_available?
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/layer-todo-generator.md
     output:
       artifact_path:
@@ -1756,6 +1768,7 @@ agents:
       - red_suite_evidence_gate.output?
       - layer_context_failure_gate.output?
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/layer-todo-reviser.md
     output:
       artifact_path:
@@ -1937,6 +1950,7 @@ agents:
       - star_step.output.model_tier
       - star_step.output.reasoning_effort
       - star_step.output.brief?
+      - star_step.output.rulings?
     reasoning:
       effort: "{{ star_step.output.reasoning_effort }}"
     prompt: !file prompts/agent-test-author.md
@@ -2168,6 +2182,7 @@ agents:
       - star_step.output.model_tier
       - star_step.output.reasoning_effort
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/implementor.md
     output:
       selected_layer:
@@ -2317,6 +2332,7 @@ agents:
       - graphify_status.output.graph_available?
       - graphify_refresh.output.graph_available?
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/layer-reviewer.md
     output:
       artifact_path:
@@ -2425,6 +2441,7 @@ agents:
       - graphify_status.output.graph_available?
       - graphify_refresh.output.graph_available?
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/cleanup-planner.md
     output:
       artifact_path:
@@ -2498,6 +2515,7 @@ agents:
       - cleanup_plan_revision_gate.output.additional_input.feedback?
       - cleanup_approval_gate.output.additional_input.feedback?
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/cleanup-plan-reviser.md
     output:
       artifact_path:
@@ -2673,6 +2691,7 @@ agents:
       - star_step.output.model_tier
       - star_step.output.reasoning_effort
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/cleanup-implementor.md
     output:
       selected_layer:
@@ -2821,6 +2840,7 @@ agents:
       - graphify_status.output.graph_available?
       - graphify_refresh.output.graph_available?
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/cleanup-reviewer.md
     output:
       artifact_path:
@@ -2915,6 +2935,7 @@ agents:
       - slice_acceptance_planner.output.artifact_path
       - layer_mapper.output.artifact_path
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/final-reviewer.md
     output:
       artifact_path:
@@ -2989,6 +3010,7 @@ agents:
       - workflow.input.memory_namespace?
       - workflow.input.memory_project?
       - star_step.output.brief?
+      - star_step.output.rulings?
     prompt: !file prompts/memory-capturer.md
     output:
       artifact_path:
