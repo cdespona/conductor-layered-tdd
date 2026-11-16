@@ -961,7 +961,7 @@ agents:
         type: string
         description: Short layer map summary.
     routes:
-      - to: layer_selection_gate
+      - to: layer_todo_names
 
   - name: layer_map_reviser
     description: Reconcile human feedback into the active layer map.
@@ -971,6 +971,9 @@ agents:
     input:
       - slice_acceptance_planner.output.artifact_path
       - layer_mapper.output.artifact_path
+      - layer_todo_names.output?
+      - layer_map_revision_todo_names.output?
+      - layer_todo_naming_gate.output?
     prompt: !file prompts/layer-map-reviser.md
     output:
       artifact_path:
@@ -986,7 +989,53 @@ agents:
         type: string
         description: Short layer-map revision summary.
     routes:
+      - to: layer_map_revision_todo_names
+
+  - name: layer_todo_names
+    type: script
+    description: Give every mapped layer its canonical todo file, layers/<layer id>.md.
+    input:
+      - layer_mapper.output.artifact_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/name-layer-todos.py
+      - "{{ layer_mapper.output.artifact_path }}"
+    routes:
+      - to: layer_selection_gate
+        when: "{{ output.exit_code == 0 }}"
+      - to: layer_todo_naming_gate
+
+  - name: layer_map_revision_todo_names
+    type: script
+    description: Re-apply canonical layer todo names after a layer-map revision.
+    input:
+      - layer_mapper.output.artifact_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/name-layer-todos.py
+      - "{{ layer_mapper.output.artifact_path }}"
+    routes:
       - to: layer_map_revision_gate
+        when: "{{ output.exit_code == 0 }}"
+      - to: layer_todo_naming_gate
+
+  - name: layer_todo_naming_gate
+    type: human_gate
+    prompt: |
+      The workflow names every layer todo `layers/<layer id>.md` from the Layer
+      Matrix and could not match a todo to every mapped layer. No layer runs
+      until the map and its todos agree.
+
+      Layer map artifact: `{{ layer_mapper.output.artifact_path }}`
+      Error: {% if layer_map_revision_todo_names is defined and layer_map_revision_todo_names.output is defined and layer_map_revision_todo_names.output.exit_code != 0 %}{{ layer_map_revision_todo_names.output.stderr }}{% elif layer_todo_names is defined and layer_todo_names.output is defined %}{{ layer_todo_names.output.stderr }}{% endif %}
+    options:
+      - label: Revise the layer map and its todos.
+        value: revise_map
+        prompt_for: feedback
+        route: layer_map_reviser
+      - label: Stop this slice.
+        value: stop
+        route: stopped
 
   - name: layer_selection_gate
     type: human_gate

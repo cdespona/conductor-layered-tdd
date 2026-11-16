@@ -424,6 +424,20 @@ class StarStepTests(unittest.TestCase):
             events = [e for e in step.ledger.events if e["type"] == "context_failure_to_gate"]
             self.assertEqual(events[0]["data"]["gate"], "layer_context_failure_gate")
 
+    def test_failed_todo_naming_goes_to_its_gate_not_the_hub(self):
+        snap = snapshot(acceptance__approved=(True, "acceptance-build"))
+        snap["cursor"] = {"spoke": "layer-map", "phase": CATALOG.position("layer-map")[0],
+                          "sub": CATALOG.position("layer-map")[1], "layer": None}
+        snap["entered"] = {"spoke": "layer-map", "brief": ""}
+        for script in ("layer_todo_names", "layer_map_revision_todo_names"):
+            step = self.make(snap, ["star_step", "layer_mapper", script], {
+                "layer_mapper": {"artifact_path": "m.md", "outcome": "done", "reason": ""},
+                script: {"exit_code": 1, "stderr": "no todo file found for layer(s) L20"}})
+            result = step.dispatch()
+            self.assertEqual(result["next"], "layer_todo_naming_gate", script)
+            self.assertIn("L20", result["reason"])
+            self.assertEqual(step.snap["escalations"]["used"], 0)
+
     def test_layer_context_failure_gate_choices_follow_the_layer_todo_rules(self):
         back = self.make(self.layer_snapshot(), ["layer_context_failure_gate"], {
             "layer_context_failure_gate": {"selected": "select_other_layer"}})

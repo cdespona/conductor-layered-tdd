@@ -46,7 +46,7 @@ class ConductorAcceptanceIntegration(unittest.TestCase):
             subprocess.run(["git", *args], check=True, capture_output=True)
 
         plan = Path(".github/plans/smoke")
-        todo = plan / "layers/L10.todo.md"
+        todo = plan / "layers/L10.md"
         layer_map = plan / "01-layer-map.md"
         regression = "test ! -f tests/layer_check.py || python3 tests/layer_check.py"
         steps = []
@@ -113,7 +113,7 @@ if __name__ == "__main__":
 """)
                 return dict(summary="Built CLI driver and persistent black-box acceptance")
             if name == "layer_mapper":
-                write(layer_map, "---\nselected_layer: L10\n---\n# Layer map\n")
+                write(layer_map, "---\nselected_layer: L10\n---\n# Layer map\n\n## Layer Matrix\n\n| Order | Layer ID | Todo file |\n| --- | --- | --- |\n| 1 | `L10` | `layers/L10.md` |\n")
                 write(todo, """---
 selected_layer: L10
 layer_size: small

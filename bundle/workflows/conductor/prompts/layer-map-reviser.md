@@ -7,6 +7,15 @@ The active layer map is fixed:
 This is a revision pass, not a fresh layer-mapping run. Read the active map,
 its active layer todos, and all human feedback before revising in place.
 
+{% for step in [layer_todo_names, layer_map_revision_todo_names] if step is defined and step.output is defined and step.output.exit_code is defined and step.output.exit_code != 0 %}
+Todo naming failed: {{ step.output.stderr }}
+{% endfor %}
+{% for gate in [layer_todo_naming_gate] if gate is defined and gate.output is defined and gate.output.additional_input is defined %}
+Todo naming feedback: {{ gate.output.additional_input.feedback | default('') }}
+{% endfor %}
+Layer todos always live at `layers/<layer id>.md`; a workflow script enforces
+the name after this pass.
+
 Persist the immediately preceding Conductor gate decision and any non-empty gate
 comment in `## Decision Log`.
 

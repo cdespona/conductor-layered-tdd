@@ -64,7 +64,7 @@
       "entry": "layer_mapper",
       "reopen_entry": "layer_map_reviser",
       "default_next": "layer-select",
-      "steps": ["layer_mapper", "layer_map_gate", "layer_map_reviser", "layer_map_revision_gate"],
+      "steps": ["layer_mapper", "layer_todo_names", "layer_map_gate", "layer_map_reviser", "layer_map_revision_todo_names", "layer_map_revision_gate", "layer_todo_naming_gate"],
       "preconditions": "Slice acceptance validated and approved.",
       "requires": {"eq": ["acceptance.approved", true]}
     },

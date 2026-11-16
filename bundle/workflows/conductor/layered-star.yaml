@@ -315,6 +315,9 @@ agents:
       - layer_map_gate.output?
       - layer_map_reviser.output?
       - layer_map_revision_gate.output?
+      - layer_todo_names.output?
+      - layer_map_revision_todo_names.output?
+      - layer_todo_naming_gate.output?
       - layer_selection_gate.output?
       - layer_selection_recorder.output?
       - selected_layer_router.output?
@@ -405,6 +408,9 @@ agents:
             'layer_map_gate': (layer_map_gate.output if layer_map_gate is defined else none),
             'layer_map_reviser': (layer_map_reviser.output if layer_map_reviser is defined else none),
             'layer_map_revision_gate': (layer_map_revision_gate.output if layer_map_revision_gate is defined else none),
+            'layer_todo_names': ({'exit_code': layer_todo_names.output.exit_code | default(none), 'stderr': layer_todo_names.output.stderr | default(none), 'renamed': layer_todo_names.output.renamed | default(none)} if layer_todo_names is defined else none),
+            'layer_map_revision_todo_names': ({'exit_code': layer_map_revision_todo_names.output.exit_code | default(none), 'stderr': layer_map_revision_todo_names.output.stderr | default(none), 'renamed': layer_map_revision_todo_names.output.renamed | default(none)} if layer_map_revision_todo_names is defined else none),
+            'layer_todo_naming_gate': (layer_todo_naming_gate.output if layer_todo_naming_gate is defined else none),
             'layer_selection_gate': (layer_selection_gate.output if layer_selection_gate is defined else none),
             'layer_selection_recorder': (layer_selection_recorder.output if layer_selection_recorder is defined else none),
             'selected_layer_router': (selected_layer_router.output if selected_layer_router is defined else none),
@@ -506,6 +512,7 @@ agents:
           - layer_approval_gate
           - cleanup_approval_gate
           - layer_context_failure_gate
+          - layer_todo_naming_gate
     routes:
       - to: requirements_griller
         when: "{{ output.next == 'requirements_griller' }}"
@@ -597,6 +604,8 @@ agents:
         when: "{{ output.next == 'cleanup_approval_gate' }}"
       - to: layer_context_failure_gate
         when: "{{ output.next == 'layer_context_failure_gate' }}"
+      - to: layer_todo_naming_gate
+        when: "{{ output.next == 'layer_todo_naming_gate' }}"
       - to: failed
 
   - name: hub
@@ -1398,7 +1407,7 @@ agents:
     routes:
       - to: star_step
         when: "{{ output.outcome != 'done' }}"
-      - to: layer_map_gate
+      - to: layer_todo_names
 
   - name: layer_map_gate
     type: human_gate
@@ -1438,6 +1447,9 @@ agents:
     input:
       - slice_acceptance_planner.output.artifact_path
       - layer_mapper.output.artifact_path
+      - layer_todo_names.output?
+      - layer_map_revision_todo_names.output?
+      - layer_todo_naming_gate.output?
       - star_step.output.brief?
     prompt: !file prompts/layer-map-reviser.md
     output:
@@ -1465,7 +1477,58 @@ agents:
     routes:
       - to: star_step
         when: "{{ output.outcome != 'done' }}"
+      - to: layer_map_revision_todo_names
+
+  - name: layer_todo_names
+    type: script
+    description: Give every mapped layer its canonical todo file, layers/<layer id>.md.
+    input:
+      - layer_mapper.output.artifact_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/name-layer-todos.py
+      - "{{ layer_mapper.output.artifact_path }}"
+    routes:
+      - to: layer_map_gate
+        when: "{{ output.exit_code == 0 }}"
+      - to: star_step
+
+  - name: layer_map_revision_todo_names
+    type: script
+    description: Re-apply canonical layer todo names after a layer-map revision.
+    input:
+      - layer_mapper.output.artifact_path
+    command: python3
+    args:
+      - workflows/conductor/scripts/name-layer-todos.py
+      - "{{ layer_mapper.output.artifact_path }}"
+    routes:
       - to: layer_map_revision_gate
+        when: "{{ output.exit_code == 0 }}"
+      - to: star_step
+
+  - name: layer_todo_naming_gate
+    type: human_gate
+    prompt: |
+      The workflow names every layer todo `layers/<layer id>.md` from the Layer
+      Matrix and could not match a todo to every mapped layer. No layer runs
+      until the map and its todos agree.
+
+      Layer map artifact: `{{ layer_mapper.output.artifact_path }}`
+      Error: {{ star_step.output.reason }}
+    options:
+      - label: Revise the layer map and its todos.
+        value: revise_map
+        prompt_for: feedback
+        route: layer_map_reviser
+      - label: Redirect the run; describe in free text what should happen (goes to the hub).
+        value: redirect
+        prompt_for: redirect
+        multiline: true
+        route: star_step
+      - label: Stop this slice.
+        value: stop
+        route: star_step
 
   - name: layer_map_revision_gate
     type: human_gate

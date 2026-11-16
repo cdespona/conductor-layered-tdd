@@ -68,6 +68,9 @@ AGENT_GATES = {
     "cleanup_reviewer": "cleanup_approval_gate",
 }
 GATE_ACTIONS_REDIRECT = {"redirect"}
+# Deterministic layer todo naming after mapping or revision: a failure goes to
+# its in-spoke gate so the map is revised, never to the hub.
+TODO_NAMING_STEPS = {"layer_todo_names", "layer_map_revision_todo_names"}
 # Deterministic layer-context steps whose failure means the active layer todo
 # needs fixing: the human decides at the in-spoke gate, not the hub.
 CONTEXT_FAILURE_GATES = {
@@ -481,6 +484,15 @@ class StarStep:
                 f("layer_map.path", artifact, "agent")
             if step in {"layer_mapper", "layer_map_reviser"}:
                 from_agent(step)
+                return result
+            if step in TODO_NAMING_STEPS:
+                # Only a failure reaches the router; success goes to the map gate.
+                error = str(o(step).get("stderr") or "").strip() or f"exit code {o(step).get('exit_code')}"
+                result.update(outcome="blocked", reason=f"{step} failed: {shorten(error, 1500)}",
+                              gate="layer_todo_naming_gate")
+                return result
+            if step == "layer_todo_naming_gate":
+                from_gate(step)
                 return result
             from_gate(step, "layer_map.decision")
             return result
